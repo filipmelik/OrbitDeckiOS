@@ -19,6 +19,7 @@ private final class TrackArcCache {
 
 struct HomeView: View {
     @EnvironmentObject private var store: OrbitStore
+    @Environment(\.scenePhase) private var scenePhase
     @State private var nextPass: PredictedPass?
     @State private var passError: String?
     @State private var fleetPasses: [FleetPass] = []
@@ -161,6 +162,16 @@ struct HomeView: View {
             passbandOffsetHz = 0
         }
         .onChange(of: selectedTransponderID) { _, _ in passbandOffsetHz = 0 }
+        .onChange(of: scenePhase) { _, phase in
+            if phase == .active {
+                if compassUp { location.startHeading() }
+                Task {
+                    await loadFleet() // Recalculate upcoming passes for favorites
+                }
+            } else if phase == .background {
+                location.stopHeading()
+            }
+        }
     }
 
     @ViewBuilder
@@ -186,8 +197,12 @@ struct HomeView: View {
                                     Text(entry.0.name)
                                         .foregroundStyle(entry.0.id == store.selectedSatellite?.id ? ODTheme.accent : .primary)
                                     Spacer()
-                                    Text("el \(ODFormat.angle(entry.1.elevation)) · \(ODFormat.compass(entry.1.azimuth))")
-                                        .font(.caption.monospacedDigit()).foregroundStyle(ODTheme.muted)
+                                    VStack(alignment: .trailing, spacing: 2) {
+                                        Text("el \(ODFormat.angle(entry.1.elevation)) · \(ODFormat.compass(entry.1.azimuth))")
+                                            .font(.caption.monospacedDigit()).foregroundStyle(ODTheme.muted)
+                                        Text("LOS in \(ODFormat.duration(max(0, entry.2.los.timeIntervalSinceNow)))")
+                                            .font(.caption.monospacedDigit()).foregroundStyle(ODTheme.good)
+                                    }
                                 }
                                 .contentShape(Rectangle())
                             }
@@ -197,11 +212,13 @@ struct HomeView: View {
                 }
             }
             SectionCard("Upcoming favorite passes") {
-                if fleetPasses.isEmpty {
-                    Text(fleetLoading ? "Computing…" : "No upcoming favorite passes above \(ODFormat.angle(store.preferences.minElevation)).")
+                let upcoming = fleetPasses.filter { $0.pass.aos > Date() }
+                    
+                if upcoming.isEmpty {
+                    Text(fleetLoading ? "Computing…" : "No upcoming favorite passes.")
                         .font(.caption).foregroundStyle(ODTheme.muted)
                 } else {
-                    ForEach(fleetPasses.prefix(12)) { fleet in
+                    ForEach(upcoming.prefix(12)) { fleet in
                         HStack(spacing: 8) {
                             Button { store.select(fleet.id) } label: {
                                 HStack {
@@ -239,11 +256,17 @@ struct HomeView: View {
         }
     }
 
-    private func overheadNow(favorites: [SatelliteRecord], at date: Date) -> [(SatelliteRecord, LiveLook)] {
-        favorites.compactMap { sat in
-            guard let look = try? OrbitPredictor.look(sat, observer: store.preferences.observer, at: date),
+    private func overheadNow(favorites: [SatelliteRecord], at date: Date) -> [(SatelliteRecord, LiveLook, PredictedPass)] {
+        let observer = store.preferences.observer
+        let minElevation = store.preferences.minElevation
+        
+        return favorites.compactMap { (sat) -> (SatelliteRecord, LiveLook, PredictedPass)? in
+            guard let look = try? OrbitPredictor.look(sat, observer: observer, at: date),
                   look.elevation >= 0 else { return nil }
-            return (sat, look)
+            guard let pass = try? OrbitPredictor.predictPasses(sat, observer: observer, minElevation: minElevation, maxCount: 1).first
+            else { return nil }
+            
+            return (sat, look, pass)
         }
         .sorted { $0.1.elevation > $1.1.elevation }
     }
