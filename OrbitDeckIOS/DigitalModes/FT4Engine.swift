@@ -1652,6 +1652,91 @@ enum PacketText {
     }
 
     nonisolated static func isCQ(_ text: String) -> Bool { words(text).first == "CQ" }
+
+    /// "W1AW-6" → "W1AW".
+    nonisolated static func baseCall(_ call: String) -> String {
+        String(call.uppercased().split(separator: "-").first ?? "")
+    }
+
+    /// Whether the text names the station (with or without an SSID).
+    nonisolated static func mentions(_ call: String, in text: String) -> Bool {
+        let base = baseCall(call)
+        return !base.isEmpty && words(text).contains { baseCall($0) == base }
+    }
+}
+
+// MARK: - QSO detection
+
+/// Detects a completed two-way packet exchange, for automatic logging. A QSO
+/// is complete when we've sent a station something that names it (an APRS
+/// message or ack to it, a UISS frame addressed to it, or its call in our
+/// text), it has sent something that names us, and each side evidently copied
+/// the other: its frame came after ours, or ours came back digipeated after its.
+/// Both halves must fall within `window` (one pass).
+struct PacketQSOTracker {
+    struct Contact {
+        var heardMeAt: Date?
+        var sentToAt: Date?
+        var digipeatedAt: Date?
+        /// The report it sent us, and the one we sent it (plain-text QSOs).
+        var reportReceived: String?
+        var reportSent: String?
+        var completed = false
+    }
+
+    var window: TimeInterval = 20 * 60
+    private(set) var contacts: [String: Contact] = [:]   // keyed by base call
+
+    /// A frame from `station`. Returns the contact when this completes the QSO.
+    mutating func heard(from station: String, mentioningMe: Bool, text: String, at date: Date) -> Contact? {
+        guard mentioningMe else { return nil }
+        let key = PacketText.baseCall(station)
+        var c = fresh(key, at: date)
+        c.heardMeAt = date
+        if let r = PacketText.report(in: text) { c.reportReceived = r }
+        contacts[key] = c
+        return complete(key)
+    }
+
+    /// We sent a frame naming `station`.
+    mutating func sent(to station: String, text: String, at date: Date) {
+        let key = PacketText.baseCall(station)
+        guard !key.isEmpty else { return }
+        var c = fresh(key, at: date)
+        c.sentToAt = date
+        if let r = PacketText.report(in: text) { c.reportSent = r }
+        contacts[key] = c
+    }
+
+    /// Our frame naming `station` came back through the digipeater.
+    mutating func digipeated(to station: String, at date: Date) -> Contact? {
+        let key = PacketText.baseCall(station)
+        guard var c = contacts[key], c.sentToAt != nil else { return nil }
+        c.digipeatedAt = date
+        contacts[key] = c
+        return complete(key)
+    }
+
+    /// The contact, restarted if its last activity is older than the window (so the
+    /// same station can be worked again on a later pass).
+    private func fresh(_ key: String, at date: Date) -> Contact {
+        guard let c = contacts[key] else { return Contact() }
+        let last = [c.heardMeAt, c.sentToAt, c.digipeatedAt].compactMap { $0 }.max() ?? date
+        return date.timeIntervalSince(last) > window ? Contact() : c
+    }
+
+    private mutating func complete(_ key: String) -> Contact? {
+        guard var c = contacts[key], !c.completed,
+              let heard = c.heardMeAt, let sent = c.sentToAt,
+              abs(heard.timeIntervalSince(sent)) <= window else { return nil }
+        // They named us after our send, or our send reached the satellite after
+        // they had named us.
+        let confirmed = heard > sent || (c.digipeatedAt.map { $0 >= sent && $0 >= heard } ?? false)
+        guard confirmed else { return nil }
+        c.completed = true
+        contacts[key] = c
+        return c
+    }
 }
 
 // MARK: - HDLC
@@ -2023,6 +2108,8 @@ struct PacketSettings: Codable, Equatable, Sendable {
     var autoAck = false
     /// Number our messages so the other station can ack them.
     var requestAcks = false
+    /// Log a QSO (mode PKT) automatically once a two-way exchange is complete.
+    var autoLogQSOs = true
     /// Quick messages. Placeholders: {MYCALL} {MYGRID} {MYGRID4} {CALL} {HEARD};
     /// a macro of exactly {POSITION} sends a position report.
     var macros: [String] = PacketSettings.defaultMacros
@@ -2055,6 +2142,7 @@ struct PacketSettings: Codable, Equatable, Sendable {
         symbolCode = v(.symbolCode, d.symbolCode); beaconComment = v(.beaconComment, d.beaconComment)
         positionPrecision = v(.positionPrecision, d.positionPrecision)
         autoAck = v(.autoAck, d.autoAck); requestAcks = v(.requestAcks, d.requestAcks)
+        autoLogQSOs = v(.autoLogQSOs, d.autoLogQSOs)
         macros = v(.macros, d.macros); blockBelowHorizon = v(.blockBelowHorizon, d.blockBelowHorizon)
         pttWatchdogSeconds = v(.pttWatchdogSeconds, d.pttWatchdogSeconds); persistence = v(.persistence, d.persistence)
         slotTimeMs = v(.slotTimeMs, d.slotTimeMs); maxChannelWaitSeconds = v(.maxChannelWaitSeconds, d.maxChannelWaitSeconds)
@@ -2121,6 +2209,8 @@ final class PacketEngine: ObservableObject {
     @Published private(set) var rxLevel: Float = 0
     @Published private(set) var heardSelfViaSatellite = false
     @Published private(set) var stats = (sent: 0, digipeated: 0, medianDelay: 0.0)
+    /// The last automatically logged QSO, for the card ("Logged W1AW at 14:05").
+    @Published private(set) var lastAutoLogged: (call: String, date: Date)?
 
     private weak var rig: RigController?
     private weak var audio: AudioHub?
@@ -2155,6 +2245,7 @@ final class PacketEngine: ObservableObject {
     private var recentSends: [(info: [UInt8], date: Date, logID: UUID)] = []
     private var delays: [TimeInterval] = []
     private var beaconTask: Task<Void, Never>?
+    private var qsoTracker = PacketQSOTracker()
 
     init() {
         if let data = UserDefaults.standard.data(forKey: Self.settingsKey),
@@ -2411,6 +2502,9 @@ final class PacketEngine: ObservableObject {
                         log[j].digipeatDelay = delay
                         delays.append(delay)
                         updateStats()
+                        for station in stationsNamed(by: log[j]) {
+                            if let done = qsoTracker.digipeated(to: station, at: Date()) { autoLog(station, done) }
+                        }
                     }
                 } else {
                     return      // our own audio echoing straight back, not the satellite
@@ -2420,6 +2514,11 @@ final class PacketEngine: ObservableObject {
             }
         } else {
             noteHeard(frame, aprs: aprs, isCQ: entry.isCQ)
+            let namesMe = entry.toMe || myAddress.map { PacketText.mentions($0.call, in: entry.text) } ?? false
+            if let done = qsoTracker.heard(from: frame.source.description, mentioningMe: namesMe,
+                                           text: entry.text, at: Date()) {
+                autoLog(frame.source.description, done)
+            }
         }
         if entry.toMe {
             if aprs.kind == .ack, let id = aprs.messageID, let logID = pendingAcks.removeValue(forKey: id),
@@ -2498,16 +2597,49 @@ final class PacketEngine: ObservableObject {
     }
 
     /// Log a QSO with a heard station (mode PKT), using the grid it sent.
-    func logQSO(with call: String) {
+    func logQSO(with call: String, reportSent: String? = nil, reportReceived: String? = nil, notes: String = "") {
         guard let qso, let store, let i = heard.firstIndex(where: { $0.call == call }) else { return }
         let sat = store.selectedSatellite
         var q = QSORecord.prefilled(satellite: sat, transponder: sat.flatMap { packetTransponder(for: $0) },
                                     myGrid: store.operatorGrid6, myCall: qso.config.myCall, defaultRst: "59")
         q.mode = "PKT"
-        q.call = call.split(separator: "-").first.map(String.init) ?? call
+        q.call = PacketText.baseCall(call)
         q.grid = heard[i].grid.map { String($0.prefix(4)) } ?? ""
+        if let reportSent { q.rstSent = reportSent }
+        if let reportReceived { q.rstRcvd = reportReceived }
+        q.notes = notes
         qso.add(q)
         heard[i].logged = true
+    }
+
+    /// Stations one of our frames is addressed to or names: the APRS addressee,
+    /// a UISS destination call, or heard calls in the text.
+    private func stationsNamed(by entry: PacketLogEntry) -> [String] {
+        var out: [String] = []
+        let aprs = entry.aprs
+        if [.message, .ack, .reject].contains(aprs.kind), !aprs.addressee.isEmpty { out.append(aprs.addressee) }
+        let dest = entry.frame.destination.call
+        if aprs.kind == .other, dest != "CQ", dest != Self.tocall { out.append(dest) }
+        for station in heard where PacketText.mentions(station.call, in: entry.text) { out.append(station.call) }
+        var seen = Set<String>()
+        return out.filter { seen.insert(PacketText.baseCall($0)).inserted }
+    }
+
+    /// Log a completed exchange, unless the operator already logged this station
+    /// on this satellite within the last 30 minutes.
+    private func autoLog(_ station: String, _ contact: PacketQSOTracker.Contact) {
+        guard settings.autoLogQSOs, let qso else { return }
+        let base = PacketText.baseCall(station)
+        let satName = store?.selectedSatellite?.name ?? ""
+        let recent = qso.qsos.contains {
+            $0.call.uppercased() == base && $0.sat == satName && Date().timeIntervalSince($0.utc) < 30 * 60
+        }
+        guard !recent else { return }
+        // The heard list is keyed by the full call; the frame may use another SSID.
+        guard let call = heard.first(where: { PacketText.baseCall($0.call) == base })?.call else { return }
+        logQSO(with: call, reportSent: contact.reportSent, reportReceived: contact.reportReceived,
+               notes: "Logged automatically by the packet terminal")
+        lastAutoLogged = (base, Date())
     }
 
     // MARK: Transmit
@@ -2585,6 +2717,7 @@ final class PacketEngine: ObservableObject {
                                    text: Self.displayText(frame: frame, aprs: aprs))
         classify(&entry); entry.toMe = false
         append(entry)
+        for station in stationsNamed(by: entry) { qsoTracker.sent(to: station, text: entry.text, at: Date()) }
         recentSends.append((frame.info, Date(), entry.id))
         stats = (sent: stats.sent + 1, digipeated: stats.digipeated, medianDelay: stats.medianDelay)
         txQueue.append(frame)

@@ -689,6 +689,10 @@ struct HomePacketCard: View {
                 if packet.heardSelfViaSatellite { Label("Heard yourself via the satellite", systemImage: "checkmark.seal.fill").foregroundStyle(ODTheme.good) }
             }
             .font(.caption)
+            if let logged = packet.lastAutoLogged {
+                Label("Logged \(logged.call) at \(ODFormat.primaryClock(logged.date))", systemImage: "book.closed.fill")
+                    .font(.caption).foregroundStyle(ODTheme.good)
+            }
         }
     }
 
@@ -904,6 +908,9 @@ struct HomePacketCard: View {
                         value: $packet.settings.beaconMinutes, in: 0...30)
                 Toggle("Number my messages (request acks)", isOn: $packet.settings.requestAcks)
                 Toggle("Acknowledge messages to me", isOn: $packet.settings.autoAck)
+                Toggle("Log QSOs automatically", isOn: $packet.settings.autoLogQSOs)
+                Text("Logs a PKT QSO once you and a station have each sent the other's call, and its reply came after yours or yours was heard back through the satellite. Grid and reports come from the frames. A station already logged on this satellite in the last 30 minutes isn't logged again.")
+                    .font(.caption2).foregroundStyle(ODTheme.muted)
                 Toggle("Block sending while the satellite is below the horizon", isOn: $packet.settings.blockBelowHorizon)
             }
             Group {

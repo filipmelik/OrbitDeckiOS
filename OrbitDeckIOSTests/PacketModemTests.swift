@@ -130,6 +130,44 @@ struct APRSExtrasTests {
     }
 }
 
+struct PacketQSOTrackerTests {
+    let t0 = Date(timeIntervalSince1970: 1_800_000_000)
+
+    @Test func theirReplyAfterOursCompletes() throws {
+        var t = PacketQSOTracker()
+        // W1AW calls CQ (doesn't name us): nothing yet.
+        #expect(t.heard(from: "W1AW-6", mentioningMe: false, text: "CQ FN31", at: t0) == nil)
+        t.sent(to: "W1AW-6", text: "W1AW FM18 599", at: t0.addingTimeInterval(20))
+        let reply = t.heard(from: "W1AW-6", mentioningMe: true, text: "N8HM R 579 73", at: t0.addingTimeInterval(45))
+        let done = try #require(reply)
+        #expect(done.reportSent == "599" && done.reportReceived == "579")
+        // Completes once only.
+        #expect(t.heard(from: "W1AW", mentioningMe: true, text: "N8HM 73", at: t0.addingTimeInterval(60)) == nil)
+    }
+
+    @Test func theyCalledFirstNeedsOurDigipeat() {
+        var t = PacketQSOTracker()
+        #expect(t.heard(from: "W1AW-6", mentioningMe: true, text: "N8HM FN31 599", at: t0) == nil)
+        t.sent(to: "W1AW", text: "W1AW R 599 73", at: t0.addingTimeInterval(10))
+        // Not yet: no sign W1AW copied us. Our copy coming back off the satellite completes it.
+        #expect(t.digipeated(to: "W1AW", at: t0.addingTimeInterval(11)) != nil)
+    }
+
+    @Test func oneSidedOrStaleExchangesDontLog() {
+        var t = PacketQSOTracker()
+        t.sent(to: "W1AW", text: "W1AW FM18", at: t0)
+        #expect(t.digipeated(to: "W1AW", at: t0.addingTimeInterval(1)) == nil)   // they never named us
+        // Their reply comes a pass later (beyond the window): it starts a new contact.
+        #expect(t.heard(from: "W1AW", mentioningMe: true, text: "N8HM 73", at: t0.addingTimeInterval(95 * 60)) == nil)
+    }
+
+    @Test func callMatchingIgnoresSSID() {
+        #expect(PacketText.mentions("N8HM-6", in: "cq de w1aw, n8hm-7 599"))
+        #expect(!PacketText.mentions("N8HM", in: "N8HMX FM18"))
+        #expect(PacketText.baseCall("w1aw-12") == "W1AW")
+    }
+}
+
 struct AFSKModemTests {
     @Test func offsetBanksRecoverMistunedSignal() {
         // Both tones 400 Hz high (beyond what the nominal correlators tolerate).
