@@ -27,7 +27,7 @@ struct RigControlSettingsView: View {
                     Toggle("Two radios (separate uplink + downlink)", isOn: bind(\.twoRadios))
                     Text(rig.config.twoRadios
                          ? "Radio 1 controls the downlink, Radio 2 the uplink."
-                         : "One radio. A full-duplex satellite rig can drive both the uplink and downlink; a single half-duplex radio controls only the uplink or the downlink.")
+                         : "One radio. A full-duplex satellite rig can drive both the uplink and downlink on MAIN/SUB. Most transceivers can also drive both in split-VFO mode (half duplex, for packet and same-band satellites), or control just one leg.")
                         .font(.caption).foregroundStyle(ODTheme.muted)
                 }
 
@@ -112,14 +112,16 @@ struct RigControlSettingsView: View {
     /// Fields for a catalog radio over BLE or Icom network (the original flow).
     @ViewBuilder private func radioSlotFields(index: Int, spec: RadioSpec?) -> some View {
         let slotBind = bindSlot(index)
-        if !rig.config.twoRadios, let spec, spec.fullDuplex {
-            Picker("Controls", selection: slotBind.role) {
-                ForEach(RigRole.allCases) { Text($0.label).tag($0) }
+        if !rig.config.twoRadios, let spec {
+            Picker("Controls", selection: controlChoice(index)) {
+                if spec.fullDuplex { Text("Uplink + downlink (MAIN/SUB)").tag("both") }
+                if spec.supportsSplit { Text("Uplink + downlink (split VFO)").tag("split") }
+                Text(RigRole.downlink.label).tag("downlink")
+                if !spec.rxOnly { Text(RigRole.uplink.label).tag("uplink") }
             }
-        } else if !rig.config.twoRadios {
-            Picker("Controls", selection: slotBind.role) {
-                Text(RigRole.downlink.label).tag(RigRole.downlink)
-                Text(RigRole.uplink.label).tag(RigRole.uplink)
+            if rig.config.slots[index].splitVFO, spec.supportsSplit {
+                Text(splitHelp(spec))
+                    .font(.caption).foregroundStyle(ODTheme.muted)
             }
         }
 
@@ -170,6 +172,46 @@ struct RigControlSettingsView: View {
                             .font(.caption).foregroundStyle(ODTheme.muted)
                     }
                 }
+    }
+
+    /// The single-radio "Controls" choice, folding the leg role and split-VFO flag
+    /// into one picker: MAIN/SUB full duplex, split VFO, or one leg.
+    private func controlChoice(_ i: Int) -> Binding<String> {
+        Binding(get: {
+            let slot = rig.config.slots[i]
+            if slot.splitVFO, slot.spec?.supportsSplit == true { return "split" }
+            switch slot.role {
+            case .both:
+                // A mono radio can't do MAIN/SUB; show its effective single leg.
+                return slot.spec?.fullDuplex == true ? "both" : "downlink"
+            case .downlink: return "downlink"
+            case .uplink: return "uplink"
+            }
+        }, set: { choice in
+            rig.config.slots[i].splitVFO = (choice == "split")
+            switch choice {
+            case "both", "split": rig.config.slots[i].role = .both
+            case "uplink": rig.config.slots[i].role = .uplink
+            default: rig.config.slots[i].role = .downlink
+            }
+        })
+    }
+
+    private func splitHelp(_ spec: RadioSpec) -> String {
+        var text = "VFO A receives the downlink and VFO B transmits the uplink with SPLIT on, both Doppler-corrected — for same-band or same-frequency satellites (packet digipeaters, ISS APRS) on any transceiver. Half duplex: you can't hear the satellite while transmitting."
+        switch spec.family {
+        case .civ where !spec.civUnselectedVFO:
+            text += " This radio reaches VFO B by swapping VFOs, so uplink updates pause while OrbitDeck has it keyed; avoid keying by hand mid-update."
+        case .civ where spec.fullDuplex:
+            text += " Satellite mode is turned off; split runs on the MAIN band."
+        case .yaesuBinary:
+            text += " Leave the radio on VFO A before connecting: these Yaesus can only toggle VFOs, not select one."
+        case .kenwoodBase:
+            text += " Satellite (SATL) mode is turned off for split."
+        default:
+            break
+        }
+        return text
     }
 
     /// Transport picker binding that fills in the right default port when switching

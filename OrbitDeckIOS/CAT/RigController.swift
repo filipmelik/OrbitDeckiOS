@@ -44,6 +44,7 @@ final class RigController: ObservableObject {
         let radioName: String
         let transport: CATTransportKind
         let leg: RigRole
+        var split = false
         var connecting: Bool
         var connected: Bool
         var error: String?
@@ -57,7 +58,8 @@ final class RigController: ObservableObject {
         /// e.g. "IC-705 · Icom network (Wi-Fi)" or "TH-D75 · BLE — downlink".
         var title: String {
             var s = "\(radioName) · \(transport.label)"
-            if leg != .both { s += " — \(leg == .uplink ? "uplink" : "downlink")" }
+            if split { s += " — split VFO" }
+            else if leg != .both { s += " — \(leg == .uplink ? "uplink" : "downlink")" }
             return s
         }
     }
@@ -133,7 +135,17 @@ final class RigController: ObservableObject {
         let spec: RadioSpec
         let transport: CATTransport
         let leg: RigRole      // .both, .downlink or .uplink
+        /// Single-radio split VFO (leg .both): VFO A = downlink, VFO B = uplink.
+        var split = false
     }
+
+    /// True while OrbitDeck has the uplink keyed (FT4/PTT). Split rigs that must
+    /// swap VFOs to reach VFO B skip uplink writes then, so a swap never lands
+    /// mid-transmission. (A manual PTT press can't be seen.)
+    private var pttKeyed = false
+    /// The latest Doppler-corrected uplink dial (rig units), pushed just before
+    /// keying a split rig so the transmission starts on frequency.
+    private var lastTargetTx: Int64 = 0
 
     private static let configKey = "orbitdeck.rigConfig"
 
@@ -169,8 +181,12 @@ final class RigController: ObservableObject {
         // A receive-only radio (CI-V receivers, RX-only handhelds) can only ever be a
         // downlink: never honour a config that assigns it the uplink/both leg, so no TX
         // frequency/mode/PTT frame is sent to a radio that must not transmit.
-        let leg0: RigRole = config.twoRadios ? .downlink : (spec0.rxOnly ? .downlink : slot0.role)
-        built.append(LiveLink(slot: slot0, spec: spec0, transport: makeTransport(slot0, spec: spec0, index: 0), leg: leg0))
+        // Single-radio split VFO: one radio, both legs, on VFO A/B (rigctld has its own
+        // split option and is excluded here).
+        let split0 = !config.twoRadios && slot0.splitVFO && slot0.transport != .rigctld && spec0.supportsSplit
+        let leg0: RigRole = split0 ? .both : (config.twoRadios ? .downlink : (spec0.rxOnly ? .downlink : slot0.role))
+        built.append(LiveLink(slot: slot0, spec: spec0, transport: makeTransport(slot0, spec: spec0, index: 0),
+                              leg: leg0, split: split0))
         if config.twoRadios, config.slots.count > 1, config.slots[1].enabled, let spec1 = config.slots[1].spec {
             if spec1.rxOnly {
                 ODLog.shared.log("ignoring uplink radio \(spec1.name): receive-only", category: "cat")
@@ -192,7 +208,7 @@ final class RigController: ObservableObject {
         // Seed per-radio status (both show "Connecting…" for a two-radio station).
         statuses = built.enumerated().map { i, link in
             RigLinkStatus(id: i, radioName: link.spec.name, transport: link.slot.transport,
-                          leg: link.leg, connecting: true, connected: false, error: nil)
+                          leg: link.leg, split: link.split, connecting: true, connected: false, error: nil)
         }
         for link in built {
             ODLog.shared.log("connect start: \(link.spec.name) via \(String(describing: link.slot.transport)) leg=\(String(describing: link.leg)) host=\(link.slot.host):\(link.slot.port)", category: "cat")
@@ -250,14 +266,48 @@ final class RigController: ObservableObject {
         statuses.removeAll()
         // Leave the radio the way we found it: take a Kenwood back out of SATL on an
         // operator-initiated disconnect (best-effort; the link is still up here).
-        Task { await sendKenwoodSatExit(); await teardown(); statusText = "Not connected." }
+        Task { await sendKenwoodSatExit(); await sendSplitExit(); await teardown(); statusText = "Not connected." }
     }
 
     /// Best-effort SATL exit for a full-duplex Kenwood before teardown.
     private func sendKenwoodSatExit() async {
-        for link in links where kenwoodSat(link.spec) && link.leg == .both {
+        for link in links where kenwoodSat(link.spec) && link.leg == .both && !link.split {
             for f in CATCodec.kwSatExit() { await sendRaw(link, f) }
         }
+    }
+
+    /// Best-effort SPLIT off on an operator disconnect, leaving the radio as found.
+    private func sendSplitExit() async {
+        for link in links where link.split {
+            switch link.spec.family {
+            case .civ:         await sendRaw(link, CATCodec.civSplit(addr: civAddr(link), on: false))
+            case .yaesuBinary: await sendRaw(link, CATCodec.yaesuSplitOff)
+            case .kenwoodBase: for f in CATCodec.kwSplit(on: false) { await sendRaw(link, f) }
+            default: break
+            }
+        }
+    }
+
+    /// Split engage: take the rig out of any satellite mode (split runs on one band),
+    /// park it on VFO A (receive) and turn SPLIT on so VFO B transmits.
+    private func engageSplit(_ link: LiveLink) async {
+        let addr = civAddr(link)
+        switch link.spec.family {
+        case .civ:
+            if let off = CATCodec.civSatMode(link.spec, addr: addr, on: false) { await sendRaw(link, off); await pace(60) }
+            // MAIN/SUB rigs (IC-9100/9700): split lives on the MAIN band.
+            if link.spec.fullDuplex, let main = CATCodec.civSelect(link.spec, addr: addr, sub: false) { await sendRaw(link, main) }
+            await sendRaw(link, CATCodec.civSelectVFO(addr: addr, b: false))
+            await sendRaw(link, CATCodec.civSplit(addr: addr, on: true))
+        case .yaesuBinary:
+            await sendRaw(link, CATCodec.yaesuSplitOn)
+        case .kenwoodBase:
+            if kenwoodSat(link.spec) { for f in CATCodec.kwSatExit() { await sendRaw(link, f); await pace(60) } }
+            for f in CATCodec.kwSplit(on: true) { await sendRaw(link, f); await pace(30) }
+        default:
+            break
+        }
+        ODLog.shared.log("split VFO ON → \(link.spec.name) (VFO A = RX, VFO B = TX)", category: "cat")
     }
 
     private func teardown() async {
@@ -330,6 +380,7 @@ final class RigController: ObservableObject {
     private func engageOnce() async {
         for link in links {
             let addr = civAddr(link)
+            if link.split { await engageSplit(link); continue }
             // CardSat's YaesuRig::begin() sends CAT-ON on connect for both the
             // FT-847 (full-duplex) and the FT-736R. Mono FT-817-family legs don't.
             if link.spec.family == .yaesuFT736 || (link.spec.family == .yaesuBinary && link.spec.fullDuplex) {
@@ -381,6 +432,10 @@ final class RigController: ObservableObject {
         let toneOn = config.tuning.uplinkToneHz > 0 && isFM
         for link in links {
             switch link.leg {
+            case .both where link.split:
+                await sendModeCIVorOther(link, mode: ulMode, leg: .uplink)
+                await sendModeCIVorOther(link, mode: dlMode, leg: .downlink)
+                if toneOn { await sendSplitTone(link, toneHz: config.tuning.uplinkToneHz) }
             case .both:
                 // Uplink first (mode + uplink CTCSS on the MAIN band), downlink last —
                 // so a full-duplex CI-V rig is left band-selected on the DOWNLINK, the
@@ -406,7 +461,7 @@ final class RigController: ObservableObject {
     /// of RS-44) actually land the downlink on the VFO the operator hears. Auto for
     /// canAssignBand rigs; other rigs are unaffected.
     private func applyBandAssignment(tp: TransponderRecord) async {
-        for link in links where link.spec.canAssignBand && link.leg == .both {
+        for link in links where link.spec.canAssignBand && link.leg == .both && !link.split {
             let dlBand = CATCodec.civBandCode(UInt64(max(0, tp.downlinkCenter)))
             guard dlBand != 0 else { continue }
             // MAIN carries the downlink on these rigs (mainCarriesUplink == false), so
@@ -481,14 +536,20 @@ final class RigController: ObservableObject {
         guard let tp = transponder(for: sat) else { return bailLog("no transponder for \(sat.name) — select one on the Home card") }
         bailLog("")   // clear: we can tune
         let observer = store.preferences.observer
-        let isFM = tp.mode.uppercased().contains("FM")
+        // Receiver modes from the SatNOGS modulation (SSTV/AFSK/GMSK… → FM, BPSK → USB),
+        // with the uplink taken from SatNOGS's uplink_mode when it has one.
+        var dlMode = RigMode.downlink(for: tp)
+        var ulMode = RigMode.uplink(for: tp, downlink: dlMode)
+        let isFM = dlMode.isFM
         var deadband = Int64(isFM ? config.tuning.fmDeadbandHz : config.tuning.linearDeadbandHz)   // adapted near TCA (D2)
-        var dlMode = RigMode.parse(tp.mode)
-        // Amateur FM satellites are narrow-band, so command FM-N on FM birds (the rig picks
-        // its narrow FM filter). Settable; falls back to plain FM on rigs without a CAT
-        // narrow-FM filter byte. Doesn't touch modes the DB already marks narrow.
-        if dlMode == .fm, config.tuning.narrowFM { dlMode = .fmn }
-        let ulMode = uplinkMode(dlMode, invert: tp.invert, linear: tp.isLinear)
+        // Voice FM, SSTV and 1200-baud packet birds are narrow-band, so command FM-N on
+        // them (the rig picks its narrow FM filter). 9600-baud data needs wide FM and is
+        // left alone. Settable; falls back to plain FM on rigs without a CAT narrow-FM
+        // filter byte. Doesn't touch modes the DB already marks narrow.
+        if config.tuning.narrowFM {
+            if dlMode == .fm, RigMode.narrowFMSuitable(tp.mode, baud: tp.baud) { dlMode = .fmn }
+            if ulMode == .fm, RigMode.narrowFMSuitable(tp.uplinkMode ?? tp.mode, baud: tp.baud) { ulMode = .fmn }
+        }
 
         // Re-apply mode + step (and tone) whenever the satellite, transponder or
         // mode changes — the frequency band changes with them.
@@ -498,7 +559,7 @@ final class RigController: ObservableObject {
             lastSentRx = 0; lastSentTx = 0; uplinkDeferTicks = 0
             ODLog.shared.log("engage \(sat.name)/\(tp.id): dl=\(dlMode.rawValue) ul=\(ulMode.rawValue) \(isFM ? "FM" : "linear")", category: "cat")
             await applyBandAssignment(tp: tp)
-            await applyModes(dlMode: dlMode, ulMode: ulMode, isFM: isFM)
+            await applyModes(dlMode: dlMode, ulMode: ulMode, isFM: ulMode.isFM)
         }
 
         // One True Rule: read the followed leg and fold an operator dial move into
@@ -567,6 +628,7 @@ final class RigController: ObservableObject {
         downlinkDialHz = rxReal; uplinkDialHz = txReal
         let rxRig = rxReal - config.tuning.xvtrDownlinkHz
         let txRig = txReal - config.tuning.xvtrUplinkHz
+        lastTargetTx = uplink > 0 ? txRig : 0
 
         // D2 — adaptive deadband: when the downlink Doppler is slewing fast (near TCA),
         // shrink the deadband so the dial updates more often exactly when it matters;
@@ -644,6 +706,7 @@ final class RigController: ObservableObject {
     /// Read the current frequency (rig units) of a leg, or nil if unavailable.
     private func readLegFreq(_ link: LiveLink, leg: RigRole) async -> UInt64? {
         guard link.spec.canReadFreq else { return nil }
+        if link.split { return await readSplitLegFreq(link, leg: leg) }
         switch link.spec.family {
         case .civ:
             if link.spec.fullDuplex, let sel = CATCodec.civSelect(link.spec, addr: civAddr(link), sub: useSub(for: leg, spec: link.spec)) {
@@ -735,13 +798,127 @@ final class RigController: ObservableObject {
     /// Leave a full-duplex CI-V rig band-selected on the downlink (SUB) so it stays
     /// on receive after an uplink write. No-op for rigs without CI-V band access.
     private func reselectDownlink(_ link: LiveLink) async {
-        guard link.spec.family == .civ, link.spec.fullDuplex,
+        guard link.spec.family == .civ, link.spec.fullDuplex, !link.split,
               let sel = CATCodec.civSelect(link.spec, addr: civAddr(link), sub: useSub(for: .downlink, spec: link.spec)) else { return }
         await sendRaw(link, sel)
     }
 
+    // MARK: Split VFO routing (VFO A = downlink/receive, VFO B = uplink/transmit)
+
+    /// Whether reaching VFO B on this rig means swapping VFOs (no direct
+    /// unselected-VFO command), which must not happen while transmitting.
+    private func splitNeedsSwap(_ link: LiveLink) -> Bool {
+        switch link.spec.family {
+        case .civ:         return !link.spec.civUnselectedVFO
+        case .yaesuBinary: return true
+        default:           return false     // Kenwood FA/FB address each VFO directly
+        }
+    }
+
+    private func sendSplitFreq(_ link: LiveLink, leg: RigRole, hz: Int64) async {
+        let u = UInt64(hz)
+        let addr = civAddr(link)
+        if leg == .uplink, pttKeyed, splitNeedsSwap(link) {
+            ODLog.shared.log("split: uplink write held while transmitting (\(link.spec.name) swaps VFOs)", category: "cat")
+            return
+        }
+        switch link.spec.family {
+        case .civ:
+            if leg == .downlink {
+                await sendRaw(link, CATCodec.civSetFreq(link.spec, addr: addr, hz: u))       // VFO A is selected
+            } else if link.spec.civUnselectedVFO {
+                await sendRaw(link, CATCodec.civSetUnselectedFreq(link.spec, addr: addr, hz: u))
+            } else {
+                await sendRaw(link, CATCodec.civSelectVFO(addr: addr, b: true))
+                await sendRaw(link, CATCodec.civSetFreq(link.spec, addr: addr, hz: u))
+                await sendRaw(link, CATCodec.civSelectVFO(addr: addr, b: false))
+            }
+        case .yaesuBinary:
+            if leg == .uplink { await sendRaw(link, CATCodec.yaesuToggleVFO) }
+            await sendRaw(link, CATCodec.yaesuSetFreq(link.spec, hz: u, vfo: .plain))
+            if leg == .uplink { await sendRaw(link, CATCodec.yaesuToggleVFO) }
+        case .kenwoodBase:
+            await sendRaw(link, CATCodec.kwSetFreq(vfo: leg == .uplink ? "FB" : "FA", hz: u))
+        default:
+            break
+        }
+    }
+
+    private func sendSplitMode(_ link: LiveLink, mode: RigMode, leg: RigRole) async {
+        let addr = civAddr(link)
+        switch link.spec.family {
+        case .civ:
+            if leg == .downlink {
+                await sendRaw(link, CATCodec.civSetMode(link.spec, addr: addr, mode: mode))
+            } else if link.spec.civUnselectedVFO {
+                await sendRaw(link, CATCodec.civSetUnselectedMode(link.spec, addr: addr, mode: mode))
+            } else {
+                await sendRaw(link, CATCodec.civSelectVFO(addr: addr, b: true))
+                await sendRaw(link, CATCodec.civSetMode(link.spec, addr: addr, mode: mode))
+                await sendRaw(link, CATCodec.civSelectVFO(addr: addr, b: false))
+            }
+        case .yaesuBinary:
+            if leg == .uplink { await sendRaw(link, CATCodec.yaesuToggleVFO) }
+            await sendRaw(link, CATCodec.yaesuSetMode(link.spec, mode: mode, vfo: .plain))
+            if leg == .uplink { await sendRaw(link, CATCodec.yaesuToggleVFO) }
+        case .kenwoodBase:
+            // MD sets the receive VFO's mode: make B the receive VFO for the uplink.
+            if leg == .uplink { await sendRaw(link, CATCodec.kwReceiveVFO(b: true)) }
+            await sendRaw(link, CATCodec.kwSetMode(mode))
+            if leg == .uplink { await sendRaw(link, CATCodec.kwReceiveVFO(b: false)) }
+        default:
+            break
+        }
+    }
+
+    /// Uplink CTCSS on a split rig. Icom tone settings are per VFO, so set it on
+    /// VFO B (the transmit VFO) and A alike; Kenwood's TN/TO are global.
+    private func sendSplitTone(_ link: LiveLink, toneHz: Double) async {
+        switch link.spec.family {
+        case .civ:
+            let addr = civAddr(link)
+            await sendRaw(link, CATCodec.civSelectVFO(addr: addr, b: true))
+            await sendTone(link, on: true, toneHz: toneHz)
+            await sendRaw(link, CATCodec.civSelectVFO(addr: addr, b: false))
+            await sendTone(link, on: true, toneHz: toneHz)
+        default:
+            await sendTone(link, on: true, toneHz: toneHz)
+        }
+    }
+
+    private func readSplitLegFreq(_ link: LiveLink, leg: RigRole) async -> UInt64? {
+        switch link.spec.family {
+        case .civ:
+            let addr = civAddr(link)
+            if leg == .uplink {
+                guard !pttKeyed else { return nil }
+                await sendRaw(link, CATCodec.civSelectVFO(addr: addr, b: true))
+            }
+            await sendRaw(link, CATCodec.civReadFreq(addr: addr))
+            let data = await link.transport.readAvailable(maxWait: 0.5)
+            if leg == .uplink { await sendRaw(link, CATCodec.civSelectVFO(addr: addr, b: false)) }
+            return CATCodec.civParseFreq(data, addr: addr)
+        case .yaesuBinary:
+            if leg == .uplink {
+                guard !pttKeyed else { return nil }
+                await sendRaw(link, CATCodec.yaesuToggleVFO)
+            }
+            await sendRaw(link, CATCodec.yaesuReadFreq(link.spec, vfo: .plain))
+            let data = await link.transport.readAvailable(maxWait: 0.5)
+            if leg == .uplink { await sendRaw(link, CATCodec.yaesuToggleVFO) }
+            return CATCodec.yaesuParseFreq(link.spec, data)
+        case .kenwoodBase:
+            await sendRaw(link, CATCodec.kwReadFreq(vfoB: leg == .uplink))
+            let data = await link.transport.readAvailable(maxWait: 0.5)
+            return CATCodec.kwParseFreq(data, vfoB: leg == .uplink)
+        default:
+            return nil
+        }
+    }
+
     private func sendFreq(_ link: LiveLink, leg: RigRole, hz: Int64, mode: RigMode) async {
         guard hz > 0 else { return }
+        if link.split { await sendSplitFreq(link, leg: leg, hz: hz); return }
         let u = UInt64(hz)
         switch link.spec.family {
         case .civ:
@@ -775,6 +952,7 @@ final class RigController: ObservableObject {
     }
 
     private func sendModeCIVorOther(_ link: LiveLink, mode: RigMode, leg: RigRole) async {
+        if link.split { await sendSplitMode(link, mode: mode, leg: leg); return }
         // Whether to command the DATA sub-mode for this SSB leg (FT4 digital audio path).
         let wantData = useDataModeForDigital && (mode == .usb || mode == .lsb) && isDataModeCapable(link.spec)
         switch link.spec.family {
@@ -860,6 +1038,10 @@ final class RigController: ObservableObject {
         return nil
     }
 
+    /// True when the connected station is a single radio in split-VFO (half-duplex)
+    /// mode. Full-duplex-only features (satellite FT4) check this.
+    var isSplitVFO: Bool { connected && links.contains { $0.split } }
+
     // MARK: PTT (for full-duplex FT4)
 
     /// Whether the uplink radio can be keyed over CAT.
@@ -879,6 +1061,23 @@ final class RigController: ObservableObject {
             return
         }
         ODLog.shared.log("setPTT(\(on)) → \(link.spec.name) [\(link.spec.family)]", category: "cat")
+        // Split: put VFO B on the current Doppler target before keying, since uplink
+        // writes that need a VFO swap are held for the length of the transmission.
+        var heldTickLock = false
+        if on, link.split {
+            // On a VFO-swapping rig a tick may have VFO B selected right now, and with
+            // SPLIT on that would transmit on VFO A. Let any in-flight tick finish, then
+            // hold the tick lock until the radio is keyed so none can start in between.
+            var waited = 0
+            while isTicking, waited < 2000 { await pace(20); waited += 20 }
+            if !isTicking { isTicking = true; heldTickLock = true }
+            if lastTargetTx > 0, lastTargetTx != lastSentTx {
+                await sendSplitFreq(link, leg: .uplink, hz: lastTargetTx)
+                lastSentTx = lastTargetTx
+            }
+        }
+        defer { if heldTickLock { isTicking = false } }
+        pttKeyed = on
         switch link.spec.family {
         case .civ: await sendRaw(link, CATCodec.civPTT(addr: civAddr(link), on: on))
         case .yaesuBinary, .yaesuFT736: await sendRaw(link, CATCodec.yaesuPTT(on: on))
@@ -894,10 +1093,5 @@ final class RigController: ObservableObject {
         if let id = transponderID, let tp = sat.transponders.first(where: { $0.id == id }) { return tp }
         // Prefer a two-way (linear/FM with uplink) transponder, else the first.
         return sat.transponders.first(where: { $0.uplinkCenter > 0 }) ?? sat.transponders.first
-    }
-
-    private func uplinkMode(_ dl: RigMode, invert: Bool, linear: Bool) -> RigMode {
-        guard linear, invert else { return dl }
-        switch dl { case .usb: return .lsb; case .lsb: return .usb; default: return dl }
     }
 }

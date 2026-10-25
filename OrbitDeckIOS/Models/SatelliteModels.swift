@@ -40,6 +40,9 @@ struct TransponderRecord: Identifiable, Codable, Equatable, Sendable {
     /// caches written before it existed still decode; nil (and manual entries)
     /// count as active.
     var alive: Bool? = nil
+    /// SatNOGS `uplink_mode` when it differs from or adds to `mode` (e.g. FM down,
+    /// AFSK up). Optional for older caches; nil means "same as the downlink".
+    var uplinkMode: String? = nil
 
     var isActive: Bool { alive ?? true }
 
@@ -70,6 +73,9 @@ struct TransponderRecord: Identifiable, Codable, Equatable, Sendable {
     var kind: String {
         if isLinear { return invert ? "Linear (inverting)" : "Linear" }
         let haystack = "\(mode) \(description)".uppercased()
+        // SSTV and DUV are received in FM but deserve their own label.
+        if haystack.contains("SSTV") { return "SSTV (FM)" }
+        if haystack.contains("DUV") { return "FM (DUV)" }
         if haystack.contains("FM") { return "FM" }
         if haystack.contains("CW") || haystack.contains("BEACON") { return "CW / Beacon" }
         for tag in ["BPSK", "GMSK", "FSK", "AFSK", "GFSK", "QPSK", "MSK", "LORA", "APRS", "AX.25"] {

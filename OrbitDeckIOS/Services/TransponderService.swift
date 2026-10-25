@@ -122,6 +122,7 @@ struct TransponderService {
         let invert = (row["invert"] as? Bool) ?? false
         // `alive` mirrors SatNOGS status (active/inactive); fall back to status.
         let alive = (row["alive"] as? Bool) ?? ((row["status"] as? String).map { $0 == "active" })
+        let uplinkMode = (row["uplink_mode"] as? String).flatMap { $0.trimmingCharacters(in: .whitespaces).isEmpty ? nil : $0 }
         return TransponderRecord(
             id: id,
             description: description,
@@ -134,7 +135,8 @@ struct TransponderService {
             type: type,
             baud: double(row["baud"]),
             service: service,
-            alive: alive
+            alive: alive,
+            uplinkMode: uplinkMode
         )
     }
 

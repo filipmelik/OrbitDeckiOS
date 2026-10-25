@@ -114,6 +114,24 @@ enum CATCodec {
     /// exchange is a toggle, so it must be sent exactly once when a swap is needed.
     static func civExchangeMainSub(addr: UInt8) -> [UInt8] { civFrame(addr: addr, payload: [0x07, 0xB0]) }
 
+    // MARK: CI-V split VFO (single radio: VFO A = receive, VFO B = transmit)
+
+    /// Select VFO A (`07 00`) or VFO B (`07 01`).
+    static func civSelectVFO(addr: UInt8, b: Bool) -> [UInt8] { civFrame(addr: addr, payload: [0x07, b ? 0x01 : 0x00]) }
+    /// SPLIT on (`0F 01`) / off (`0F 00`).
+    static func civSplit(addr: UInt8, on: Bool) -> [UInt8] { civFrame(addr: addr, payload: [0x0F, on ? 0x01 : 0x00]) }
+    /// Set the unselected VFO's frequency (`25 01 <BCD>`) — IC-705/905/9700 class.
+    static func civSetUnselectedFreq(_ spec: RadioSpec, addr: UInt8, hz: UInt64) -> [UInt8] {
+        let n = (spec.wideFreq && hz > 5_850_000_000) ? 6 : 5
+        return civFrame(addr: addr, payload: [0x25, 0x01] + civBCD(hz, bytes: n))
+    }
+    /// Set the unselected VFO's mode (`26 01 <mode> <data> <filter>`), data off.
+    /// FM-N uses the rig's narrow-FM filter number; everything else FIL1.
+    static func civSetUnselectedMode(_ spec: RadioSpec, addr: UInt8, mode: RigMode) -> [UInt8] {
+        let filter: UInt8 = (mode == .fmn && spec.fmNarrowFilter != 0) ? spec.fmNarrowFilter : 0x01
+        return civFrame(addr: addr, payload: [0x26, 0x01, civModeByte(mode), 0x00, filter])
+    }
+
     static func civReadFreq(addr: UInt8) -> [UInt8] { civFrame(addr: addr, payload: [0x03]) }
 
     /// Parse a CI-V read-frequency reply (FE FE E0 <addr> 03 <5/6 BCD> FD).
@@ -218,6 +236,12 @@ enum CATCodec {
     }
 
     static let yaesuCATOn: [UInt8] = [0, 0, 0, 0, 0x00]
+    /// FT-817/818/857/897 SPLIT on (0x02) / off (0x82), and VFO A/B toggle (0x81).
+    /// There is no absolute VFO select, so split Doppler toggles to B, writes, and
+    /// toggles back — which assumes the radio was left on VFO A.
+    static let yaesuSplitOn: [UInt8] = [0, 0, 0, 0, 0x02]
+    static let yaesuSplitOff: [UInt8] = [0, 0, 0, 0, 0x82]
+    static let yaesuToggleVFO: [UInt8] = [0, 0, 0, 0, 0x81]
     /// FT-847 satellite mode ON (0x4E) / OFF (0x8E) — Hamlib ft847.c. The sat RX/TX VFO
     /// freq/mode commands (0x11/0x21, 0x17/0x27) can be set regardless of mode, but the
     /// radio must be in SAT for that tracking to drive actual receive/transmit. Harmless
@@ -269,6 +293,13 @@ enum CATCodec {
         Array(String(format: "%@%011llu;", vfo, hz).utf8)
     }
     static func kwSetMode(_ m: RigMode) -> [UInt8] { Array("MD\(kwModeDigit(m));".utf8) }
+    /// TS-2000/790 split: receive on VFO A (`FR0`), transmit on VFO B (`FT1`); off = `FT0`.
+    static func kwSplit(on: Bool) -> [[UInt8]] {
+        on ? [Array("FR0;".utf8), Array("FT1;".utf8)] : [Array("FT0;".utf8)]
+    }
+    /// Receive-VFO select (`FR0`/`FR1`). `MD` applies to the receive VFO, so the uplink
+    /// (VFO B) mode is set by briefly making B the receive VFO.
+    static func kwReceiveVFO(b: Bool) -> [UInt8] { Array((b ? "FR1;" : "FR0;").utf8) }
     /// Read VFO A (downlink) or VFO B (uplink) on a full-duplex Kenwood.
     static func kwReadFreq(vfoB: Bool = false) -> [UInt8] { Array((vfoB ? "FB;" : "FA;").utf8) }
     /// TS-2000 TX CTCSS: TNnn + TO1/TO0. Uses the Kenwood 38-tone list (no 69.3 Hz) so the

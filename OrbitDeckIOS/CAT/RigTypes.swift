@@ -28,18 +28,72 @@ enum RigMode: String, Codable, Sendable, CaseIterable, Identifiable {
     /// True for both wide and narrow FM (deadband, tone, "is this an FM bird" checks).
     var isFM: Bool { self == .fm || self == .fmn }
 
-    /// Best-effort parse of a transponder/mode string ("USB", "FM", "CW", …).
-    static func parse(_ text: String) -> RigMode {
+    /// Receiver mode for a transponder/SatNOGS mode string ("USB", "FM", "SSTV",
+    /// "AFSK", "GMSK USP", "BPSK", …). SatNOGS names the *modulation*, not the
+    /// receiver mode, so each modulation maps to how it is received on an amateur
+    /// rig: SSTV, AFSK/APRS packet, FSK/GMSK/G3RUH data, DUV and APT come out of an
+    /// FM receiver, while PSK, LoRa, OFDM and WSJT modes are taken in USB. When a
+    /// string names several (e.g. "GFSK/BPSK"), the first one wins. Unrecognized
+    /// strings return `fallback`.
+    static func parse(_ text: String, fallback: RigMode = .usb) -> RigMode {
         let t = text.uppercased()
-        if t.contains("LSB") { return .lsb }
-        if t.contains("USB") { return .usb }
-        if t.contains("CW") { return .cw }
-        // Narrow FM ("FM-N", "FMN", "NFM") before plain FM (all contain "FM").
+        // Narrow FM first: every spelling contains "FM".
         if t.contains("FMN") || t.contains("FM-N") || t.contains("NFM") { return .fmn }
-        if t.contains("FM") { return .fm }
-        if t.contains("AM") { return .am }
-        if t.contains("DATA") || t.contains("DIG") || t.contains("FSK") || t.contains("RTTY") { return .data }
-        return .usb
+        var best: (position: String.Index, mode: RigMode)?
+        func consider(_ token: String, _ mode: RigMode) {
+            guard let r = t.range(of: token) else { return }
+            if best == nil || r.lowerBound < best!.position { best = (r.lowerBound, mode) }
+        }
+        consider("LSB", .lsb)
+        consider("USB", .usb)
+        consider("CW", .cw)
+        consider("MORSE", .cw)
+        // FM-received modulations.
+        for token in ["FM", "SSTV", "AFSK", "APRS", "FSK", "GMSK", "GFSK", "MSK", "G3RUH", "AX.25", "AX.100",
+                      "DUV", "APT", "DSTAR", "D-STAR", "SSDV"] { consider(token, .fm) }
+        // SSB-received modulations. MFSK is checked so it beats the "FSK" inside it.
+        for token in ["BPSK", "QPSK", "PSK", "MFSK", "LORA", "FT8", "FT4", "WSJT", "OFDM", "RTTY", "DSB",
+                      "SIDLOC", "CERTO", "DOKA"] { consider(token, .usb) }
+        // A bare "AM" word (avoid matching inside other words).
+        if t.split(whereSeparator: { !$0.isLetter }).contains("AM") { consider("AM", .am) }
+        // Earliest token wins; "MFSK" starts before the "FSK" inside it, so it beats it.
+        if let best { return best.mode }
+        if t.contains("DATA") || t.contains("DIG") { return .data }
+        return fallback
+    }
+
+    /// Whether a mode string + baud rate is narrow-band enough for FM-N. Voice FM,
+    /// SSTV and 1200-baud AFSK/APRS are; 9600-baud (G3RUH/GMSK/GFSK/FSK) data needs
+    /// the wide FM filter or it won't decode, and data with an unknown baud is left wide.
+    static func narrowFMSuitable(_ text: String, baud: Double) -> Bool {
+        if baud >= 4800 { return false }
+        let t = text.uppercased()
+        if t.contains("G3RUH") || t.contains("9K6") || t.contains("9600") { return false }
+        let narrowFamilies = ["SSTV", "AFSK", "APRS", "DUV", "FMN", "FM-N", "NFM"]
+        if narrowFamilies.contains(where: { t.contains($0) }) { return true }
+        // Plain "FM" voice (not an FSK data mode, which would contain FSK/MSK).
+        let words = t.split(whereSeparator: { !$0.isLetter && !$0.isNumber })
+        if words.contains("FM") { return true }
+        // No mode on file: treat as voice FM (the FM fallback in `downlink(for:)`).
+        return t.trimmingCharacters(in: .whitespaces).isEmpty
+    }
+
+    /// Receiver mode for a transponder's downlink. Unknown/empty modes fall back to
+    /// USB on a linear transponder and FM otherwise (most amateur single-channel
+    /// downlinks are FM or FM-received data).
+    static func downlink(for tp: TransponderRecord) -> RigMode {
+        parse(tp.mode, fallback: tp.isLinear ? .usb : .fm)
+    }
+
+    /// Receiver mode for a transponder's uplink. SatNOGS's `uplink_mode` wins when
+    /// present. Otherwise the uplink mirrors the downlink, sideband-flipped on an
+    /// inverting linear transponder.
+    static func uplink(for tp: TransponderRecord, downlink dl: RigMode) -> RigMode {
+        if let text = tp.uplinkMode, !text.trimmingCharacters(in: .whitespaces).isEmpty {
+            return parse(text, fallback: dl)
+        }
+        guard tp.isLinear, tp.invert else { return dl }
+        switch dl { case .usb: return .lsb; case .lsb: return .usb; default: return dl }
     }
 }
 
@@ -216,6 +270,28 @@ enum RadioCatalog {
     }
 }
 
+extension RadioSpec {
+    /// Whether the radio can run single-radio split (VFO A receive / VFO B transmit
+    /// with SPLIT on) over CAT. Excludes receivers, the IC-820/821/910/970 (MAIN/SUB
+    /// satellite rigs without CAT-addressable A/B split), the FT-847/FT-736R (SAT
+    /// VFOs only), and families with no split command. rigctld has its own split
+    /// toggle (Hamlib does the work).
+    var supportsSplit: Bool {
+        guard !rxOnly else { return false }
+        switch family {
+        case .civ:          return !fullDuplex || canAssignBand      // monos + IC-9100/9700
+        case .yaesuBinary:  return !fullDuplex                       // FT-817/818/857/897
+        case .kenwoodBase:  return id == "TS-2000" || id == "TS-790" // FR/FT RX/TX VFO select
+        default:            return false
+        }
+    }
+
+    /// CI-V 0x25/0x26: set the *unselected* VFO's frequency/mode directly, so split
+    /// Doppler never has to swap VFOs (which would briefly move the receiver, and is
+    /// unsafe mid-transmission). Older rigs fall back to 07 01 … 07 00 swaps.
+    var civUnselectedVFO: Bool { ["IC-705", "IC-905", "IC-9700"].contains(id) }
+}
+
 // MARK: - Roles / transport
 
 /// Which leg(s) a radio drives.
@@ -257,6 +333,11 @@ struct RigSlot: Codable, Sendable, Equatable {
     var username = ""                // Icom Network User1 (password in Keychain)
     var civAddrOverride = 0          // 0 = use radio default
     var baudOverride = 0             // 0 = use radio default (informational; BLE adapters set their own baud)
+    /// Single-radio split: VFO A receives the downlink and VFO B transmits the uplink
+    /// with the radio's SPLIT on, each Doppler-tracked. For same-band / same-frequency
+    /// birds (packet digipeaters, ISS APRS) and plain non-satellite transceivers.
+    /// Half duplex: the radio can't hear the satellite while transmitting.
+    var splitVFO = false
 
     /// The driving radio spec. For a rigctld link there is no catalog radio —
     /// Hamlib abstracts it — so return the synthetic rigctld spec.
@@ -331,6 +412,7 @@ private extension KeyedDecodingContainer {
 extension RigSlot {
     enum CK: String, CodingKey {
         case enabled, radioID, role, transport, bleIdentifier, bleName, host, port, username, civAddrOverride, baudOverride
+        case splitVFO
     }
     init(from decoder: Decoder) throws {
         let c = try decoder.container(keyedBy: CK.self)
@@ -346,6 +428,7 @@ extension RigSlot {
         s.username = c.value(String.self, .username, s.username)
         s.civAddrOverride = c.value(Int.self, .civAddrOverride, s.civAddrOverride)
         s.baudOverride = c.value(Int.self, .baudOverride, s.baudOverride)
+        s.splitVFO = c.value(Bool.self, .splitVFO, s.splitVFO)
         self = s
     }
     func encode(to encoder: Encoder) throws {
@@ -361,6 +444,7 @@ extension RigSlot {
         try c.encode(username, forKey: .username)
         try c.encode(civAddrOverride, forKey: .civAddrOverride)
         try c.encode(baudOverride, forKey: .baudOverride)
+        try c.encode(splitVFO, forKey: .splitVFO)
     }
 }
 

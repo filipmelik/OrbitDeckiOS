@@ -102,12 +102,20 @@ struct HomeFT4Card: View {
                 if !ft4.errorText.isEmpty {
                     Text(ft4.errorText).font(.caption).foregroundStyle(ODTheme.warning)
                 }
+                // Satellite FT4 needs full duplex to hear your own downlink; split VFO
+                // is half duplex, so it can't start there.
+                let halfDuplex = rig.isSplitVFO && !ft4.isRunning
+                if halfDuplex {
+                    Text("FT4 needs a full-duplex station. The radio is in split-VFO mode, which is half duplex.")
+                        .font(.caption).foregroundStyle(ODTheme.warning)
+                }
                 HStack(spacing: 10) {
                     Circle().fill(ft4.isRunning ? ODTheme.good : ODTheme.muted).frame(width: 10, height: 10)
                     Text(ft4.status).font(.subheadline.weight(.semibold)).lineLimit(1)
                     Spacer()
                     Button(ft4.isRunning ? "Stop" : "Start") { toggleRun() }
                         .buttonStyle(.bordered)
+                        .disabled(halfDuplex)
                 }
                 SatelliteStatusLine(satellite: satellite)
                 DopplerFrequencyLine(satellite: satellite, transponderOverride: rig.transponder(for: satellite))
@@ -469,10 +477,8 @@ struct HomeFT4Card: View {
             // inverting linear transponder flips the downlink sideband on the uplink (USB
             // down → LSB up), and in LSB the audio→RF mapping inverts. Mirror the CAT
             // engine's uplinkMode() so the pre-comp cancels drift instead of doubling it.
-            let dlMode = RigMode.parse(transponder?.mode ?? "USB")
-            let ulMode: RigMode = (transponder?.isLinear == true && transponder?.invert == true)
-                ? (dlMode == .usb ? .lsb : (dlMode == .lsb ? .usb : dlMode))
-                : dlMode
+            let dlMode = transponder.map(RigMode.downlink(for:)) ?? .usb
+            let ulMode = transponder.map { RigMode.uplink(for: $0, downlink: dlMode) } ?? dlMode
             ft4.uplinkAudioInverted = (ulMode == .lsb)
             // Absolute downlink RF base for PSKReporter spots: the Doppler-corrected
             // downlink dial from CAT when connected (already includes the per-satellite
