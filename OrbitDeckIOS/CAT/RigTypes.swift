@@ -134,6 +134,9 @@ struct RadioSpec: Identifiable, Sendable, Hashable {
     /// Amateur FM satellites are narrow-band, so FM birds are commanded with `06 05 <this>`
     /// (e.g. IC-910/9100/9700 → 0x02 = FIL2). 0 falls back to plain FM.
     var fmNarrowFilter: UInt8 = 0
+    /// For rigs without mode filter bytes (`modeFilter == false`) whose CI-V table
+    /// still lists CW with one (IC-821H: CW = `06 03 01`, CW-N = `06 03 02`).
+    var cwNeedsFilter = false
 }
 
 // MARK: - Radio catalog
@@ -142,7 +145,9 @@ enum RadioCatalog {
     /// Full-duplex satellite transceivers (MAIN/SUB), from CardSat RADIOS[].
     static let fullDuplex: [RadioSpec] = [
         civ("IC-820", 0x42, 9600, selMain: [0x07,0xD1], selSub: [0x07,0xD0], sat: false),
-        civ("IC-821", 0x4C, 9600, selMain: [0x07,0xD0], selSub: [0x07,0xD1], sat: false),
+        // IC-821H manual p.42: mode bytes carry no filter byte except CW (06 03 01).
+        civ("IC-821", 0x4C, 9600, selMain: [0x07,0xD0], selSub: [0x07,0xD1], sat: false,
+            modeFilter: false, cwFilter: true),
         civ("IC-910", 0x60, 19200, selMain: [0x07,0xD1], selSub: [0x07,0xD0], sat: true,
             satCmd: 0x1A, satSub: 0x07, tone: true, toneSub: 0x42, modeFilter: false, fmNarrow: 0x02),
         civ("IC-970", 0x2E, 9600, selMain: [0x07,0xD0], selSub: [0x07,0xD1], sat: false,
@@ -178,15 +183,19 @@ enum RadioCatalog {
         civLeg("IC-905", 0xAC, 19200, lan: true, wide: true),
         civLeg("IC-7100", 0x88, 19200),
         civLeg("IC-7000", 0x70, 19200, modeFilter: false, canRead: true),
-        civLeg("IC-706MKIIG", 0x58, 9600),
-        civLeg("IC-706MKII", 0x4E, 9600),
-        civLeg("IC-706", 0x48, 9600),
-        civLeg("IC-275", 0x10, 9600),
+        // IC-706 family: the CI-V filter byte is 0-based (00 wide / 01 normal / 02 narrow,
+        // MKIIG manual), so the generic FIL1 = 01 isn't "default" there — omit it and let
+        // the radio keep its own filter. The 2xx/4xx/575/1275 tables are unverified;
+        // omitting the optional byte is the safe choice (Hamlib does for the IC-475).
+        civLeg("IC-706MKIIG", 0x58, 9600, modeFilter: false),
+        civLeg("IC-706MKII", 0x4E, 9600, modeFilter: false),
+        civLeg("IC-706", 0x48, 9600, modeFilter: false),
+        civLeg("IC-275", 0x10, 9600, modeFilter: false),
         civLeg("IC-475", 0x14, 9600, modeFilter: false),
-        civLeg("IC-271", 0x20, 9600),
-        civLeg("IC-471", 0x22, 9600),
-        civLeg("IC-575", 0x16, 9600),
-        civLeg("IC-1275", 0x18, 9600),
+        civLeg("IC-271", 0x20, 9600, modeFilter: false),
+        civLeg("IC-471", 0x22, 9600, modeFilter: false),
+        civLeg("IC-575", 0x16, 9600, modeFilter: false),
+        civLeg("IC-1275", 0x18, 9600, modeFilter: false),
         // Icom CI-V receivers (RX only)
         civLeg("IC-R10", 0x52, 9600, rxOnly: true),
         civLeg("IC-R20", 0x6C, 9600, rxOnly: true),
@@ -246,12 +255,12 @@ enum RadioCatalog {
                             satCmd: UInt8 = 0, satSub: UInt8 = 0,
                             tone: Bool = false, toneSub: UInt8 = 0,
                             modeFilter: Bool = true, assignBand: Bool = false,
-                            lan: Bool = false, fmNarrow: UInt8 = 0) -> RadioSpec {
+                            lan: Bool = false, fmNarrow: UInt8 = 0, cwFilter: Bool = false) -> RadioSpec {
         RadioSpec(id: name, name: name, family: .civ, civAddr: addr, defaultBaud: baud,
                   fullDuplex: true, rxOnly: false, hasLan: lan, canReadFreq: true, modeFilter: modeFilter,
                   hasSatMode: sat, satModeCmd: satCmd, satModeSub: satSub, hasTone: tone, toneEncSub: toneSub,
                   selMain: selMain, selSub: selSub, canAssignBand: assignBand, wideFreq: false,
-                  fmNarrowFilter: fmNarrow)
+                  fmNarrowFilter: fmNarrow, cwNeedsFilter: cwFilter)
     }
     private static func civLeg(_ name: String, _ addr: UInt8, _ baud: Int,
                                rxOnly: Bool = false, lan: Bool = false, wide: Bool = false,
@@ -272,24 +281,50 @@ enum RadioCatalog {
 
 extension RadioSpec {
     /// Whether the radio can run single-radio split (VFO A receive / VFO B transmit
-    /// with SPLIT on) over CAT. Excludes receivers, the IC-820/821/910/970 (MAIN/SUB
-    /// satellite rigs without CAT-addressable A/B split), the FT-847/FT-736R (SAT
-    /// VFOs only), and families with no split command. rigctld has its own split
-    /// toggle (Hamlib does the work).
+    /// with SPLIT on) over CAT. Per model, from the radios' CI-V/CAT references and
+    /// Hamlib (sources listed per family below). rigctld has its own split toggle.
     var supportsSplit: Bool {
         guard !rxOnly else { return false }
         switch family {
-        case .civ:          return !fullDuplex || canAssignBand      // monos + IC-9100/9700
-        case .yaesuBinary:  return !fullDuplex                       // FT-817/818/857/897
-        case .kenwoodBase:  return id == "TS-2000" || id == "TS-790" // FR/FT RX/TX VFO select
-        default:            return false
+        case .civ:          return Self.civSplitModels.contains(id)
+        case .yaesuBinary:  return !fullDuplex      // FT-817/818/857/897 (not FT-847: no CAT split)
+        case .yaesuFT100:   return true             // split 01, absolute VFO select 05 (Hamlib ft100.c)
+        case .kenwoodBase:  return true             // TS-2000 FR/FT; TS-790/711/811 FN + SP
+        default:            return false            // FT-736R (no same-band duplex), VR-5000, handhelds
         }
     }
 
+    /// Icoms with CI-V split (`0F 01`) and VFO A/B (`07 00`/`07 01`):
+    /// - IC-705, IC-905, IC-9700, IC-7100: CI-V reference guides.
+    /// - IC-7000, IC-706MKIIG: manual command tables; IC-706/MKII: Hamlib ic706.c.
+    /// - IC-9100, IC-910H: split on the MAIN band only, satellite mode off (manuals).
+    /// - IC-821H: manual pp.26/42.
+    /// Excluded: IC-275/475/575/1275/271/471 have no CI-V split command (N1MM,
+    /// Hamlib); IC-820H/IC-970 are unverified.
+    static let civSplitModels: Set<String> = ["IC-705", "IC-905", "IC-9700", "IC-7100", "IC-7000",
+                                              "IC-706", "IC-706MKII", "IC-706MKIIG",
+                                              "IC-9100", "IC-910", "IC-821"]
+
     /// CI-V 0x25/0x26: set the *unselected* VFO's frequency/mode directly, so split
     /// Doppler never has to swap VFOs (which would briefly move the receiver, and is
-    /// unsafe mid-transmission). Older rigs fall back to 07 01 … 07 00 swaps.
+    /// unsafe mid-transmission). Older rigs fall back to 07 01 … 07 00 swaps. The
+    /// IC-9700 accepts them on MAIN in VFO mode with satellite mode off.
     var civUnselectedVFO: Bool { ["IC-705", "IC-905", "IC-9700"].contains(id) }
+    /// IC-7100: 0x25/0x26 arrived with firmware E4 (v1.10), so it's probed at engage
+    /// (Hamlib's `x25x26_possibly`) and falls back to VFO swaps on older firmware.
+    var civUnselectedVFOMaybe: Bool { id == "IC-7100" }
+
+    /// Whether the radio accepts CI-V PTT (`1C 00`). The IC-706 family, IC-820/821H,
+    /// IC-970 and the IC-2xx/4xx/575/1275 generation have no 1C command, so they key
+    /// by VOX/PTT line only.
+    var civHasPTT: Bool {
+        family == .civ && !["IC-706", "IC-706MKII", "IC-706MKIIG", "IC-820", "IC-821", "IC-970",
+                             "IC-275", "IC-475", "IC-271", "IC-471", "IC-575", "IC-1275"].contains(id)
+    }
+
+    /// Kenwood split dialect: the TS-2000 uses FR/FT (receive/transmit VFO); the
+    /// TS-790/711/811 select the VFO with FN and switch split with SP.
+    var kenwoodSplitFRFT: Bool { id == "TS-2000" }
 }
 
 // MARK: - Roles / transport
@@ -393,6 +428,10 @@ struct CATTuning: Codable, Sendable, Equatable {
     // split/TX VFO (rigctl `S 1 VFOB` + `I`/`X`). Turn off for backends without a
     // usable split.
     var rigctldUseSplit = true
+    /// Split VFO on radios that must swap VFOs to reach VFO B (older Icoms, the
+    /// FT-817 family, FT-100): each uplink write briefly moves the receiver, so the
+    /// uplink only retunes once it has drifted this far (at least the normal deadband).
+    var splitUplinkDeadbandHz = 500
 }
 
 // MARK: - CTCSS
@@ -453,7 +492,7 @@ extension CATTuning {
         case trackDoppler, updateMs, commandDelayMs, mainIsUplink, satMode, assignBands
         case fmDeadbandHz, linearDeadbandHz, narrowFM, leadMs, calDownlinkHz, calUplinkHz
         case xvtrDownlinkHz, xvtrUplinkHz, uplinkToneHz, passbandOffsetHz, followRadio, followLeg
-        case followSettleMs, followUplinkResumeMs, rigctldUseSplit
+        case followSettleMs, followUplinkResumeMs, rigctldUseSplit, splitUplinkDeadbandHz
     }
     init(from decoder: Decoder) throws {
         let c = try decoder.container(keyedBy: CK.self)
@@ -479,6 +518,7 @@ extension CATTuning {
         t.followSettleMs = c.value(Int.self, .followSettleMs, t.followSettleMs)
         t.followUplinkResumeMs = c.value(Int.self, .followUplinkResumeMs, t.followUplinkResumeMs)
         t.rigctldUseSplit = c.value(Bool.self, .rigctldUseSplit, t.rigctldUseSplit)
+        t.splitUplinkDeadbandHz = c.value(Int.self, .splitUplinkDeadbandHz, t.splitUplinkDeadbandHz)
         self = t
     }
     func encode(to encoder: Encoder) throws {
@@ -504,6 +544,7 @@ extension CATTuning {
         try c.encode(followSettleMs, forKey: .followSettleMs)
         try c.encode(followUplinkResumeMs, forKey: .followUplinkResumeMs)
         try c.encode(rigctldUseSplit, forKey: .rigctldUseSplit)
+        try c.encode(splitUplinkDeadbandHz, forKey: .splitUplinkDeadbandHz)
     }
 }
 

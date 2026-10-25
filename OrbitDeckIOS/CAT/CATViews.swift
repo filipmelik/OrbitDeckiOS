@@ -200,14 +200,30 @@ struct RigControlSettingsView: View {
     private func splitHelp(_ spec: RadioSpec) -> String {
         var text = "VFO A receives the downlink and VFO B transmits the uplink with SPLIT on, both Doppler-corrected — for same-band or same-frequency satellites (packet digipeaters, ISS APRS) on any transceiver. Half duplex: you can't hear the satellite while transmitting."
         switch spec.family {
-        case .civ where !spec.civUnselectedVFO:
-            text += " This radio reaches VFO B by swapping VFOs, so uplink updates pause while OrbitDeck has it keyed; avoid keying by hand mid-update."
-        case .civ where spec.fullDuplex:
-            text += " Satellite mode is turned off; split runs on the MAIN band."
+        case .civ:
+            if spec.fullDuplex {
+                text += " Split runs on the MAIN band with satellite mode off" + (spec.hasSatMode ? " (OrbitDeck turns it off)." : " — turn SATL off on the radio first.")
+            }
+            if spec.civUnselectedVFO {
+                text += " VFO B is tuned directly, so the receiver never moves."
+            } else {
+                if spec.civUnselectedVFOMaybe {
+                    text += " With firmware E4 or later VFO B is tuned directly; older firmware swaps VFOs (detected at connect)."
+                } else {
+                    text += " This radio reaches VFO B by swapping VFOs, which briefly moves the receiver, so the uplink retunes less often (split uplink deadband below)."
+                }
+                text += spec.civHasPTT
+                    ? " Uplink updates wait while the radio reports it's transmitting."
+                    : " This radio can't report transmit over CI-V, so an update could land mid-transmission when keyed by hand or a TNC — keep the split uplink deadband wide."
+            }
         case .yaesuBinary:
-            text += " Leave the radio on VFO A before connecting: these Yaesus can only toggle VFOs, not select one."
+            text += " These Yaesus can only toggle VFOs: OrbitDeck reads which VFO is active and starts on A (if the radio doesn't answer, leave it on VFO A). The uplink retunes less often to keep the receiver steady."
+        case .yaesuFT100:
+            text += " VFO B is selected directly for each uplink update."
         case .kenwoodBase:
-            text += " Satellite (SATL) mode is turned off for split."
+            text += spec.kenwoodSplitFRFT
+                ? " Uses FR0/FT1; satellite (SATL) mode is turned off for split."
+                : " Uses FN/SP split on this radio (untested — please report results)."
         default:
             break
         }
@@ -293,6 +309,12 @@ struct RigControlSettingsView: View {
             Toggle("Assign MAIN/SUB bands (IC-9100/9700)", isOn: bindTuning(\.assignBands))
             Stepper("FM deadband: \(rig.config.tuning.fmDeadbandHz) Hz", value: bindTuning(\.fmDeadbandHz), in: 0...2000, step: 50)
             Stepper("Linear deadband: \(rig.config.tuning.linearDeadbandHz) Hz", value: bindTuning(\.linearDeadbandHz), in: 0...500, step: 10)
+            if !rig.config.twoRadios, rig.config.slots[0].splitVFO {
+                Stepper("Split uplink deadband: \(rig.config.tuning.splitUplinkDeadbandHz) Hz",
+                        value: bindTuning(\.splitUplinkDeadbandHz), in: 0...3000, step: 100)
+                Text("On split radios that swap VFOs to reach VFO B, the uplink retunes only after drifting this far, so the receiver moves less often. 1200-baud packet and FM voice tolerate 500–1000 Hz.")
+                    .font(.caption).foregroundStyle(ODTheme.muted)
+            }
             Toggle("Narrow FM on FM satellites", isOn: bindTuning(\.narrowFM))
             Stepper("Predictive lead: \(rig.config.tuning.leadMs) ms", value: bindTuning(\.leadMs), in: 0...500, step: 10)
             HStack {

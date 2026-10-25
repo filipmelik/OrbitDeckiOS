@@ -52,7 +52,7 @@ enum CATCodec {
         if mode == .fmn, spec.fmNarrowFilter != 0 {
             return civFrame(addr: addr, payload: [0x06, 0x05, spec.fmNarrowFilter])
         }
-        if spec.modeFilter {
+        if spec.modeFilter || (mode == .cw && spec.cwNeedsFilter) {
             return civFrame(addr: addr, payload: [0x06, civModeByte(mode), 0x01])
         }
         return civFrame(addr: addr, payload: [0x06, civModeByte(mode)])
@@ -132,6 +132,29 @@ enum CATCodec {
         return civFrame(addr: addr, payload: [0x26, 0x01, civModeByte(mode), 0x00, filter])
     }
 
+    /// Read the selected VFO's frequency via 0x25 (`25 00`) — used only as a probe:
+    /// a `25` reply means the rig supports 0x25/0x26; `FA` (NG) or silence means not.
+    static func civProbeUnselectedVFO(addr: UInt8) -> [UInt8] { civFrame(addr: addr, payload: [0x25, 0x00]) }
+    /// Read the transmit state (`1C 00`): reply `1C 00 01` = transmitting.
+    static func civReadTX(addr: UInt8) -> [UInt8] { civFrame(addr: addr, payload: [0x1C, 0x00]) }
+
+    /// Find the rig's reply `FE FE E0 <addr> <cmd> …` (skipping our own CI-V bus
+    /// echo, which is addressed the other way) and return the bytes after `cmd`.
+    /// Returns nil for no reply or an NG (`FA`).
+    static func civReply(_ buf: [UInt8], addr: UInt8, cmd: UInt8) -> [UInt8]? {
+        var i = 0
+        while i + 5 < buf.count {
+            if buf[i] == 0xFE, buf[i+1] == 0xFE, buf[i+2] == host, buf[i+3] == addr {
+                if buf[i+4] == 0xFA { return nil }
+                if buf[i+4] == cmd, let end = buf[(i+5)...].firstIndex(of: 0xFD) {
+                    return Array(buf[(i+5)..<end])
+                }
+            }
+            i += 1
+        }
+        return nil
+    }
+
     static func civReadFreq(addr: UInt8) -> [UInt8] { civFrame(addr: addr, payload: [0x03]) }
 
     /// Parse a CI-V read-frequency reply (FE FE E0 <addr> 03 <5/6 BCD> FD).
@@ -194,8 +217,9 @@ enum CATCodec {
             return yaesuBCDLittleEndian(hz) + [0x0A]
         }
         if spec.family == .yaesuFT736 {
-            // FT-736R full duplex (Hamlib ft736.c): RX = main (0x01), uplink = split TX (0x2E).
-            let op: UInt8 = vfo == .satTX ? 0x2E : 0x01
+            // FT-736R (Hamlib ft736.c): in full duplex the receive frequency is 0x1E and
+            // the transmit (uplink) frequency 0x2E; plain 0x01 only outside full duplex.
+            let op: UInt8 = vfo == .satTX ? 0x2E : vfo == .satRX ? 0x1E : 0x01
             return yaesuBCDBigEndian(hz) + [op]
         }
         let op: UInt8 = vfo == .satRX ? 0x11 : vfo == .satTX ? 0x21 : 0x01
@@ -209,8 +233,9 @@ enum CATCodec {
         case .yaesuVR5000:
             return [yaesuVR5000ModeByte(mode), 0, 0, 0, 0x07]
         case .yaesuFT736:
-            // FT-736R: RX mode = 0x07, uplink (split TX) mode = 0x27 (Hamlib ft736.c).
-            let op: UInt8 = vfo == .satTX ? 0x27 : 0x07
+            // FT-736R (Hamlib ft736.c): full-duplex RX mode 0x17, uplink (TX) mode 0x27;
+            // plain 0x07 outside full duplex.
+            let op: UInt8 = vfo == .satTX ? 0x27 : vfo == .satRX ? 0x17 : 0x07
             return [yaesuBinModeByte(mode), 0, 0, 0, op]
         default:
             let op: UInt8 = vfo == .satRX ? 0x17 : vfo == .satTX ? 0x27 : 0x07
@@ -242,6 +267,22 @@ enum CATCodec {
     static let yaesuSplitOn: [UInt8] = [0, 0, 0, 0, 0x02]
     static let yaesuSplitOff: [UInt8] = [0, 0, 0, 0, 0x82]
     static let yaesuToggleVFO: [UInt8] = [0, 0, 0, 0, 0x81]
+
+    /// FT-817 family EEPROM read (`<addrHi> <addrLo> 00 00 BB`, two data bytes back).
+    /// The active VFO is bit 0 of 0x0055 on the FT-817/818 and 0x0068 on the
+    /// FT-857/897 (0 = A, 1 = B — Hamlib ft817.c/ft857.c, KA7OEI). Some FT-857/897
+    /// units fail this read, so callers must treat no reply as "unknown".
+    static func yaesuVFOStatusAddress(_ spec: RadioSpec) -> UInt16 {
+        (spec.id == "FT-817" || spec.id == "FT-818") ? 0x0055 : 0x0068
+    }
+    static func yaesuReadEEPROM(_ address: UInt16) -> [UInt8] {
+        [UInt8(address >> 8), UInt8(address & 0xFF), 0, 0, 0xBB]
+    }
+
+    /// FT-100 split (`00 00 00 <01|00> 01`) and absolute VFO select
+    /// (`00 00 00 <00 A|01 B> 05`) — Hamlib ft100.c. Parameter in the 4th byte.
+    static func ft100Split(on: Bool) -> [UInt8] { [0, 0, 0, on ? 0x01 : 0x00, 0x01] }
+    static func ft100SelectVFO(b: Bool) -> [UInt8] { [0, 0, 0, b ? 0x01 : 0x00, 0x05] }
     /// FT-847 satellite mode ON (0x4E) / OFF (0x8E) — Hamlib ft847.c. The sat RX/TX VFO
     /// freq/mode commands (0x11/0x21, 0x17/0x27) can be set regardless of mode, but the
     /// radio must be in SAT for that tracking to drive actual receive/transmit. Harmless
@@ -293,13 +334,20 @@ enum CATCodec {
         Array(String(format: "%@%011llu;", vfo, hz).utf8)
     }
     static func kwSetMode(_ m: RigMode) -> [UInt8] { Array("MD\(kwModeDigit(m));".utf8) }
-    /// TS-2000/790 split: receive on VFO A (`FR0`), transmit on VFO B (`FT1`); off = `FT0`.
-    static func kwSplit(on: Bool) -> [[UInt8]] {
-        on ? [Array("FR0;".utf8), Array("FT1;".utf8)] : [Array("FT0;".utf8)]
+    /// Kenwood split. TS-2000: receive on VFO A (`FR0`), transmit on VFO B (`FT1`);
+    /// off = `FR0;FT0;` (manual PC command table). TS-790/711/811 (IF-10C/IF-10A):
+    /// select VFO A (`FN0`) then `SP1`; off = `SP0` — they have no FR/FT.
+    static func kwSplit(on: Bool, frft: Bool) -> [[UInt8]] {
+        if frft {
+            return on ? [Array("FR0;".utf8), Array("FT1;".utf8)] : [Array("FR0;".utf8), Array("FT0;".utf8)]
+        }
+        return on ? [Array("FN0;".utf8), Array("SP1;".utf8)] : [Array("SP0;".utf8)]
     }
-    /// Receive-VFO select (`FR0`/`FR1`). `MD` applies to the receive VFO, so the uplink
-    /// (VFO B) mode is set by briefly making B the receive VFO.
-    static func kwReceiveVFO(b: Bool) -> [UInt8] { Array((b ? "FR1;" : "FR0;").utf8) }
+    /// Make VFO B (or A) the active VFO so `MD` lands on it — `MD` has no VFO field.
+    /// TS-2000 uses the receive-VFO select `FR`; the older rigs use `FN`.
+    static func kwActiveVFO(b: Bool, frft: Bool) -> [UInt8] {
+        Array((frft ? (b ? "FR1;" : "FR0;") : (b ? "FN1;" : "FN0;")).utf8)
+    }
     /// Read VFO A (downlink) or VFO B (uplink) on a full-duplex Kenwood.
     static func kwReadFreq(vfoB: Bool = false) -> [UInt8] { Array((vfoB ? "FB;" : "FA;").utf8) }
     /// TS-2000 TX CTCSS: TNnn + TO1/TO0. Uses the Kenwood 38-tone list (no 69.3 Hz) so the
