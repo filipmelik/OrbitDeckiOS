@@ -106,7 +106,7 @@ struct HomeFT4Card: View {
                 // is half duplex, so it can't start there.
                 let halfDuplex = rig.isSplitVFO && !ft4.isRunning
                 if halfDuplex {
-                    Text("FT4 needs a full-duplex station. The radio is in split-VFO mode, which is half duplex.")
+                    Text("FT4 needs a full-duplex station. The radio is running half duplex (split VFO or same-band transmit hold) for this satellite.")
                         .font(.caption).foregroundStyle(ODTheme.warning)
                 }
                 HStack(spacing: 10) {

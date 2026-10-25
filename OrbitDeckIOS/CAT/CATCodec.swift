@@ -52,6 +52,12 @@ enum CATCodec {
         if mode == .fmn, spec.fmNarrowFilter != 0 {
             return civFrame(addr: addr, payload: [0x06, 0x05, spec.fmNarrowFilter])
         }
+        // Wide FM on a rig with a narrow-FM filter: say FIL1 explicitly (`06 05 01`), or a
+        // previously selected narrow filter stays in place — fatal for 9600-baud data
+        // (OscarWatch audit; matters on the IC-910, which otherwise sends no filter byte).
+        if mode == .fm, spec.fmNarrowFilter != 0 {
+            return civFrame(addr: addr, payload: [0x06, 0x05, 0x01])
+        }
         if spec.modeFilter || (mode == .cw && spec.cwNeedsFilter) {
             return civFrame(addr: addr, payload: [0x06, civModeByte(mode), 0x01])
         }
@@ -303,10 +309,26 @@ enum CATCodec {
     ]
 
     /// FT-847 CTCSS frames for the SAT-TX (uplink) VFO: [tone, encoder-on] or [off].
-    static func ft847Tone(on: Bool, toneHz: Double) -> [[UInt8]] {
-        if !on || toneHz <= 0 { return [[0x8A, 0, 0, 0, 0x2A]] }
+    /// `main` targets the main VFO (0x0A/0x0B) instead of SAT TX (0x2A/0x2B) — used by
+    /// the same-band transmit hold, where the FT-847 runs out of satellite mode.
+    static func ft847Tone(on: Bool, toneHz: Double, main: Bool = false) -> [[UInt8]] {
+        let modeOp: UInt8 = main ? 0x0A : 0x2A, toneOp: UInt8 = main ? 0x0B : 0x2B
+        if !on || toneHz <= 0 { return [[0x8A, 0, 0, 0, modeOp]] }
         guard let i = CTCSS.index(hz: toneHz) else { return [] }
-        return [[ft847CTCSS[i], 0, 0, 0, 0x2B], [0x4A, 0, 0, 0, 0x2A]]
+        return [[ft847CTCSS[i], 0, 0, 0, toneOp], [0x4A, 0, 0, 0, modeOp]]
+    }
+    /// FT-847 repeater shift → simplex (`89 00 00 00 09`), so the main VFO transmits on
+    /// the frequency it's tuned to during the same-band hold.
+    static let ft847Simplex: [UInt8] = [0x89, 0, 0, 0, 0x09]
+
+    /// FT-817/818/857/897 CTCSS for the uplink: tone frequency as BCD tenths of Hz for
+    /// TX and RX (`hi lo hi lo 0B`), then encoder on (`4A … 0A`); off = `8A … 0A`.
+    static func yaesuTone(on: Bool, toneHz: Double) -> [[UInt8]] {
+        if !on || toneHz <= 0 { return [[0x8A, 0, 0, 0, 0x0A]] }
+        let t = Int((toneHz * 10).rounded())
+        let hi = UInt8(((t / 1000) % 10) << 4 | ((t / 100) % 10))
+        let lo = UInt8(((t / 10) % 10) << 4 | (t % 10))
+        return [[hi, lo, hi, lo, 0x0B], [0x4A, 0, 0, 0, 0x0A]]
     }
 
     /// Parse a Yaesu 4-byte-BCD-+-mode read reply → Hz.
@@ -318,8 +340,11 @@ enum CATCodec {
             let hz = f * 10; return hz > 0 ? hz : nil
         }
         guard buf.count >= 5 else { return nil }
+        // The reply is the last 5 bytes received: any earlier bytes are stale replies
+        // to set commands (split on/off, CAT ON) still in the buffer.
+        let reply = Array(buf.suffix(5))
         var f: UInt64 = 0
-        for i in 0..<4 { f = f * 100 + UInt64(buf[i] >> 4) * 10 + UInt64(buf[i] & 0x0F) }
+        for i in 0..<4 { f = f * 100 + UInt64(reply[i] >> 4) * 10 + UInt64(reply[i] & 0x0F) }
         let hz = f * 10; return hz > 0 ? hz : nil
     }
 
@@ -327,7 +352,8 @@ enum CATCodec {
 
     static func kwModeDigit(_ m: RigMode) -> Character {
         // TS-2000/790 FM = '4'; narrow FM is a filter/menu setting, so FM-N maps to FM.
-        switch m { case .lsb: "1"; case .usb: "2"; case .cw: "3"; case .fm, .fmn: "4"; case .am: "5"; case .data: "6" }
+        // Data = USB ('2'): MD6 is FSK on the TS-2000, not an audio data mode.
+        switch m { case .lsb: "1"; case .usb: "2"; case .cw: "3"; case .fm, .fmn: "4"; case .am: "5"; case .data: "2" }
     }
     /// vfo = "FA" (VFO A / downlink) or "FB" (VFO B / uplink). 11 digits.
     static func kwSetFreq(vfo: String, hz: UInt64) -> [UInt8] {

@@ -85,7 +85,17 @@ final class RigController: ObservableObject {
     /// FT4 session when "Use data mode for FT4" is on, so the ACC/USB data port carries the
     /// audio rather than the mic. Only affects data-capable CI-V rigs.
     private(set) var useDataModeForDigital = false
-    private var dataModeApplied = false     // we turned DATA on and must turn it back off
+    /// Legs we put in a DATA sub-mode and must take out again, per radio and leg (a
+    /// single flag was cleared by whichever leg ran first, stranding the other in USB-D).
+    private var dataModeLegs = Set<String>()
+    /// Satellite + transponder of the last engage, so the passband offset is reset only
+    /// when the bird or transponder changes (not on a mode/data change).
+    private var lastEngageSatTp = ""
+    /// The latest Doppler-corrected downlink dial (rig units), restored after an FT-847
+    /// same-band transmit hold.
+    private var lastTargetRx: Int64 = 0
+    /// TH-D7x: the band of the last FQ, so a cross-band move re-applies the step.
+    private var lastKhtBand = 0
 
     /// Data-mode-capable CI-V transceivers (USB-D via the CI-V 0x26 mode+data command).
     /// Older rigs (IC-820/821/910/970/9100, IC-2xx/4xx, IC-706 family, IC-7000) predate 0x26
@@ -140,6 +150,9 @@ final class RigController: ObservableObject {
         /// Split only: VFO B is addressed directly (CI-V 0x25/0x26, Kenwood FB) rather
         /// than by swapping VFOs. Set at engage (the IC-7100 is probed).
         var directVFOB = false
+        /// FT-847 same-band transmit hold: no CAT split exists, so satellite mode is off,
+        /// the main VFO tracks the downlink, and it moves to the uplink only while keyed.
+        var txHold = false
     }
 
     /// True while OrbitDeck has the uplink keyed (FT4/PTT). Split rigs that must
@@ -453,6 +466,9 @@ final class RigController: ObservableObject {
             if link.spec.family == .civ, link.spec.fullDuplex,
                (config.tuning.satMode || link.spec.canAssignBand),
                let f = CATCodec.civSatMode(link.spec, addr: addr, on: true) {
+                // Satellite mode-on is ignored while split is on, and split can be left on
+                // by a dropped link or a previous same-band pass — clear it first.
+                if link.spec.supportsSplit { await sendRaw(link, CATCodec.civSplit(addr: addr, on: false)) }
                 await sendRaw(link, f)
                 ODLog.shared.log("sat mode ON → \(link.spec.name)", category: "cat")
                 await pace(60)
@@ -471,6 +487,12 @@ final class RigController: ObservableObject {
         let toneOn = config.tuning.uplinkToneHz > 0 && isFM
         for link in links {
             switch link.leg {
+            case .both where link.txHold:
+                // One VFO for both legs: the downlink mode, and the tone on the main VFO.
+                await sendModeCIVorOther(link, mode: dlMode, leg: .downlink)
+                if toneOn {
+                    for f in CATCodec.ft847Tone(on: true, toneHz: config.tuning.uplinkToneHz, main: true) { await sendRaw(link, f) }
+                }
             case .both where link.split:
                 await sendModeCIVorOther(link, mode: ulMode, leg: .uplink)
                 await sendModeCIVorOther(link, mode: dlMode, leg: .downlink)
@@ -594,11 +616,25 @@ final class RigController: ObservableObject {
         // mode changes — the frequency band changes with them.
         let key = "\(sat.id)|\(tp.id)|\(dlMode.rawValue)|\(ulMode.rawValue)|\(useDataModeForDigital)"
         if key != lastEngageKey {
+            // A passband trim belongs to one bird/transponder: reset it when that changes
+            // (e.g. automatic switching) so an RS-44 trim doesn't follow onto the next one.
+            let satTp = "\(sat.id)|\(tp.id)"
+            if satTp != lastEngageSatTp {
+                if !lastEngageSatTp.isEmpty { config.tuning.passbandOffsetHz = 0 }
+                lastEngageSatTp = satTp
+            }
             lastEngageKey = key
             lastSentRx = 0; lastSentTx = 0; uplinkDeferTicks = 0
             ODLog.shared.log("engage \(sat.name)/\(tp.id): dl=\(dlMode.rawValue) ul=\(ulMode.rawValue) \(isFM ? "FM" : "linear")", category: "cat")
+            await reconcileLayout(tp: tp)
             await applyBandAssignment(tp: tp)
+            await alignSplitBand(tp: tp)
             await applyModes(dlMode: dlMode, ulMode: ulMode, isFM: ulMode.isFM)
+        }
+        // Keep the trim inside the passband (follow mode can otherwise walk it off).
+        if tp.isLinear, tp.bandwidth > 0 {
+            let half = Double(tp.bandwidth) / 2
+            config.tuning.passbandOffsetHz = min(half, max(-half, config.tuning.passbandOffsetHz))
         }
 
         // One True Rule: read the followed leg and fold an operator dial move into
@@ -609,7 +645,7 @@ final class RigController: ObservableObject {
         if config.tuning.followRadio {
             let followLeg = config.tuning.followLeg
             let last = (followLeg == .downlink) ? lastSentRx : lastSentTx
-            if last != 0, let fl = followLink(for: followLeg),
+            if last != 0, let fl = followLink(for: followLeg), !(fl.txHold && pttKeyed),
                let obs = await readLegFreq(fl, leg: followLeg) {
                 let obsHz = Int64(obs)
                 let delta = obsHz - last
@@ -668,6 +704,7 @@ final class RigController: ObservableObject {
         let rxRig = rxReal - config.tuning.xvtrDownlinkHz
         let txRig = txReal - config.tuning.xvtrUplinkHz
         lastTargetTx = uplink > 0 ? txRig : 0
+        lastTargetRx = rxRig
 
         // D2 — adaptive deadband: when the downlink Doppler is slewing fast (near TCA),
         // shrink the deadband so the dial updates more often exactly when it matters;
@@ -698,6 +735,12 @@ final class RigController: ObservableObject {
         let settleUp = settling && config.tuning.followLeg == .uplink
         for link in links {
             switch link.leg {
+            case .both where link.txHold:
+                // FT-847 same-band hold: the main VFO tracks the downlink; the uplink is
+                // written only around a transmission (setPTT). Leave it alone while keyed.
+                if !pttKeyed, !settleDown, abs(rxRig - lastSentRx) >= deadband {
+                    await sendFreq(link, leg: .downlink, hz: rxRig, mode: dlMode); lastSentRx = rxRig
+                }
             case .both:
                 // Downlink first (CardSat driveDownlink), then uplink.
                 let followUplink = config.tuning.followRadio && config.tuning.followLeg == .uplink
@@ -742,6 +785,88 @@ final class RigController: ObservableObject {
         SSTVDopplerFeed.set(hasDownlink ? Double(rxRig - lastSentRx) : 0)
     }
 
+    // MARK: Per-pass layout (OscarWatch audit H1–H4)
+
+    /// Choose each single radio's layout for the current transponder. MAIN/SUB satellite
+    /// rigs can't put both legs on one band, so a same-band bird (dl/ul within 10 MHz,
+    /// e.g. ISS APRS) runs in split VFO for that pass and goes back to satellite mode on
+    /// the next cross-band bird. The FT-847 has no CAT split, so it gets the transmit
+    /// hold instead: satellite mode off, main VFO on the downlink, uplink only when keyed.
+    private func reconcileLayout(tp: TransponderRecord) async {
+        let sameBand = tp.uplinkCenter > 0 && abs(tp.uplinkCenter - tp.downlinkCenter) < 10_000_000
+        for i in links.indices where links[i].leg == .both && links[i].slot.transport != .rigctld {
+            let spec = links[i].spec
+            let forced = !config.twoRadios && links[i].slot.splitVFO && spec.supportsSplit
+            let wantSplit = forced || (sameBand && spec.fullDuplex && spec.supportsSplit)
+            if wantSplit != links[i].split {
+                if wantSplit {
+                    links[i].split = true
+                    links[i].directVFOB = await engageSplit(links[i])
+                } else {
+                    await leaveSplit(links[i])
+                    links[i].split = false
+                }
+                if i < statuses.count { statuses[i].split = links[i].split }
+                ODLog.shared.log("layout \(spec.name): \(wantSplit ? "split VFO" : "satellite (MAIN/SUB)") for \(sameBand ? "same-band" : "cross-band") transponder", category: "cat")
+            }
+            let wantHold = sameBand && spec.id == "FT-847"
+            if wantHold != links[i].txHold {
+                if wantHold {
+                    await sendRaw(links[i], CATCodec.ft847SatModeOff); await pace(60)
+                    await sendRaw(links[i], CATCodec.ft847Simplex); await pace(60)
+                } else {
+                    await sendRaw(links[i], CATCodec.ft847SatModeOn); await pace(60)
+                }
+                links[i].txHold = wantHold
+                ODLog.shared.log("layout FT-847: \(wantHold ? "same-band transmit hold (SAT off)" : "satellite mode")", category: "cat")
+            }
+        }
+    }
+
+    /// Back from split to the radio's satellite layout (split off first: satellite
+    /// mode-on is ignored while split is on).
+    private func leaveSplit(_ link: LiveLink) async {
+        let addr = civAddr(link)
+        switch link.spec.family {
+        case .civ:
+            await sendRaw(link, CATCodec.civSplit(addr: addr, on: false))
+            if config.tuning.satMode || link.spec.canAssignBand,
+               let on = CATCodec.civSatMode(link.spec, addr: addr, on: true) { await sendRaw(link, on); await pace(60) }
+        case .kenwoodBase:
+            for f in CATCodec.kwSplit(on: false, frft: link.spec.kenwoodSplitFRFT) { await sendRaw(link, f) }
+            if kenwoodSat(link.spec) { for f in CATCodec.kwSatEntry() { await sendRaw(link, f); await pace(60) } }
+        default:
+            break
+        }
+    }
+
+    /// IC-9100/9700 split runs on MAIN, so MAIN must carry the transponder's band:
+    /// with split off, read MAIN and exchange MAIN/SUB (07 B0) if it's on the other band,
+    /// then turn split back on (the exchange is ignored while split is on).
+    private func alignSplitBand(tp: TransponderRecord) async {
+        let target = CATCodec.civBandCode(UInt64(max(0, tp.downlinkCenter)))
+        guard target != 0 else { return }
+        for link in links where link.split && link.spec.canAssignBand {
+            let addr = civAddr(link)
+            await sendRaw(link, CATCodec.civSplit(addr: addr, on: false))
+            if let main = CATCodec.civSelect(link.spec, addr: addr, sub: false) { await sendRaw(link, main) }
+            await sendRaw(link, CATCodec.civSelectVFO(addr: addr, b: false))
+            _ = await link.transport.readAvailable(maxWait: 0.02)
+            await sendRaw(link, CATCodec.civReadFreq(addr: addr))
+            let data = await link.transport.readAvailable(maxWait: 0.5)
+            if let hz = CATCodec.civParseFreq(data, addr: addr) {
+                let band = CATCodec.civBandCode(hz)
+                if band != 0, band != target {
+                    await sendRaw(link, CATCodec.civExchangeMainSub(addr: addr)); await pace(120)
+                    if let main = CATCodec.civSelect(link.spec, addr: addr, sub: false) { await sendRaw(link, main) }
+                    await sendRaw(link, CATCodec.civSelectVFO(addr: addr, b: false))
+                    ODLog.shared.log("split \(link.spec.name): MAIN was on band 0x\(String(band, radix: 16)) — exchanged MAIN/SUB", category: "cat")
+                }
+            }
+            await sendRaw(link, CATCodec.civSplit(addr: addr, on: true))
+        }
+    }
+
     // MARK: Read-back (One True Rule)
 
     private func followLink(for leg: RigRole) -> LiveLink? {
@@ -761,6 +886,7 @@ final class RigController: ObservableObject {
             let data = await link.transport.readAvailable(maxWait: 0.5)
             return CATCodec.civParseFreq(data, addr: civAddr(link))
         case .yaesuBinary, .yaesuVR5000, .yaesuFT736, .yaesuFT100:
+            _ = await link.transport.readAvailable(maxWait: 0.02)   // drop stale set-command replies
             await sendRaw(link, CATCodec.yaesuReadFreq(link.spec, vfo: yaesuVFO(link, leg: leg)))
             let data = await link.transport.readAvailable(maxWait: 0.5)
             return CATCodec.yaesuParseFreq(link.spec, data)
@@ -839,7 +965,7 @@ final class RigController: ObservableObject {
         // VFO — but only when it's driven as one full-duplex radio (leg .both), which is
         // when SAT / full duplex is switched on at engage. As a single leg it stays on the
         // plain main VFO (0x01/0x07); the SAT opcodes would tune a VFO that isn't in use.
-        guard link.leg == .both, link.spec.fullDuplex,
+        guard link.leg == .both, link.spec.fullDuplex, !link.txHold,
               link.spec.family == .yaesuBinary || link.spec.family == .yaesuFT736 else { return .plain }
         return leg == .uplink ? .satTX : .satRX
     }
@@ -967,6 +1093,12 @@ final class RigController: ObservableObject {
             await sendTone(link, on: true, toneHz: toneHz)
             await sendRaw(link, CATCodec.civSelectVFO(addr: addr, b: false))
             await sendTone(link, on: true, toneHz: toneHz)
+        case .yaesuBinary:
+            // Tone is per VFO here too; B is the transmit VFO.
+            await sendRaw(link, CATCodec.yaesuToggleVFO); await pace(50)
+            await sendTone(link, on: true, toneHz: toneHz)
+            await sendRaw(link, CATCodec.yaesuToggleVFO); await pace(50)
+            await sendTone(link, on: true, toneHz: toneHz)
         default:
             await sendTone(link, on: true, toneHz: toneHz)
         }
@@ -1029,6 +1161,12 @@ final class RigController: ObservableObject {
             let step: UInt64 = (mode == .usb || mode == .lsb || mode == .cw || mode == .am) ? 20 : 5000
             let rounded = ((u + step / 2) / step) * step
             await sendRaw(link, CATCodec.khtSetFreq(hz: rounded))
+            // A cross-band FQ can discard the tuning step (OscarWatch audit): re-apply it.
+            let band = u < 300_000_000 ? 2 : (u < 1_000_000_000 ? 70 : 23)
+            if band != lastKhtBand {
+                if lastKhtBand != 0 { for f in CATCodec.khtStep(for: mode) { await sendRaw(link, f); await pace(20) } }
+                lastKhtBand = band
+            }
         case .rigctld:
             // Full-duplex single radio: uplink on the split/TX VFO, downlink on the
             // current VFO. A standalone leg (two-radio station) uses the main VFO.
@@ -1055,11 +1193,12 @@ final class RigController: ObservableObject {
             // uses on the IC-9700 in satellite mode (0x26 is rejected there). Only engage it
             // while FT4 wants data, or once more to CLEAR a data mode we set, so a non-FT4
             // session keeps using the plain 06 <mode> [filter] command unchanged.
-            if isDataModeCapable(link.spec), useDataModeForDigital || dataModeApplied {
+            let legKey = "\(ObjectIdentifier(link.transport).hashValue)-\(leg.rawValue)"
+            if isDataModeCapable(link.spec), useDataModeForDigital || dataModeLegs.contains(legKey) {
                 let on = useDataModeForDigital && (mode == .usb || mode == .lsb)
                 await sendRaw(link, CATCodec.civSetModeBase(addr: civAddr(link), mode: mode))
                 await sendRaw(link, CATCodec.civDataMode(link.spec, addr: civAddr(link), on: on))
-                dataModeApplied = on
+                if on { dataModeLegs.insert(legKey) } else { dataModeLegs.remove(legKey) }
                 ODLog.shared.log("civ data mode (1A 06): \(link.spec.name) mode=\(mode.rawValue) data=\(on)", category: "cat")
             } else {
                 await sendRaw(link, CATCodec.civSetMode(link.spec, addr: civAddr(link), mode: mode))
@@ -1081,8 +1220,9 @@ final class RigController: ObservableObject {
             }
             await sendRaw(link, CATCodec.kwSetMode(mode))
         case .kenwoodHandheld:
-            for f in CATCodec.khtStep(for: mode) { await sendRaw(link, f); await pace(20) }
+            // MD first, then the step: MD can reset the step (OscarWatch audit).
             await sendRaw(link, CATCodec.khtSetMode(mode))
+            for f in CATCodec.khtStep(for: mode) { await sendRaw(link, f); await pace(20) }
         case .rigctld:
             // Hamlib PKTUSB/PKTLSB/PKTFM when the data path is wanted (works on any
             // Hamlib-supported radio that has a data mode).
@@ -1100,6 +1240,9 @@ final class RigController: ObservableObject {
             for f in CATCodec.civTone(link.spec, addr: civAddr(link), on: on, toneHz: toneHz) { await sendRaw(link, f) }
         case .yaesuBinary where link.spec.id == "FT-847":
             for f in CATCodec.ft847Tone(on: on, toneHz: toneHz) { await sendRaw(link, f) }
+        case .yaesuBinary where !link.spec.fullDuplex:
+            // FT-817/818/857/897 (OscarWatch audit: SO-50 etc. need a tone on these).
+            for f in CATCodec.yaesuTone(on: on, toneHz: toneHz) { await sendRaw(link, f) }
         case .kenwoodBase:
             for f in CATCodec.kwTone(on: on, toneHz: toneHz) { await sendRaw(link, f) }
         default: break
@@ -1128,9 +1271,10 @@ final class RigController: ObservableObject {
         return nil
     }
 
-    /// True when the connected station is a single radio in split-VFO (half-duplex)
-    /// mode. Full-duplex-only features (satellite FT4) check this.
-    var isSplitVFO: Bool { connected && links.contains { $0.split } }
+    /// True when the connected station is running half duplex: a single radio in
+    /// split-VFO mode (chosen, or automatic for a same-band bird) or the FT-847
+    /// same-band transmit hold. Full-duplex-only features (satellite FT4) check this.
+    var isSplitVFO: Bool { connected && links.contains { $0.split || $0.txHold } }
 
     // MARK: PTT (for full-duplex FT4)
 
@@ -1168,6 +1312,16 @@ final class RigController: ObservableObject {
             }
         }
         defer { if heldTickLock { isTicking = false } }
+        // FT-847 same-band hold: move the main VFO to the uplink just for the transmission.
+        if on, link.txHold {
+            var waited = 0
+            while isTicking, waited < 2000 { await pace(20); waited += 20 }
+            if !isTicking { isTicking = true; heldTickLock = true }
+            if lastTargetTx > 0 {
+                await sendRaw(link, CATCodec.yaesuSetFreq(link.spec, hz: UInt64(lastTargetTx), vfo: .plain))
+                await pace(60)
+            }
+        }
         pttKeyed = on
         switch link.spec.family {
         case .civ where link.spec.civHasPTT: await sendRaw(link, CATCodec.civPTT(addr: civAddr(link), on: on))
@@ -1175,6 +1329,11 @@ final class RigController: ObservableObject {
         case .kenwoodBase: await sendRaw(link, CATCodec.kwPTT(on: on))
         case .rigctld: await sendRaw(link, CATCodec.rigctldSetPTT(on: on))
         default: break
+        }
+        if !on, link.txHold, lastTargetRx > 0 {
+            await pace(60)
+            await sendRaw(link, CATCodec.yaesuSetFreq(link.spec, hz: UInt64(lastTargetRx), vfo: .plain))
+            lastSentRx = lastTargetRx
         }
     }
 
