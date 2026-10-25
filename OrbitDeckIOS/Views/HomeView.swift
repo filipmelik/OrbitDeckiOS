@@ -200,8 +200,10 @@ struct HomeView: View {
                                     VStack(alignment: .trailing, spacing: 2) {
                                         Text("el \(ODFormat.angle(entry.1.elevation)) · \(ODFormat.compass(entry.1.azimuth))")
                                             .font(.caption.monospacedDigit()).foregroundStyle(ODTheme.muted)
-                                        Text("LOS in \(ODFormat.duration(max(0, entry.2.los.timeIntervalSinceNow)))")
-                                            .font(.caption.monospacedDigit()).foregroundStyle(ODTheme.good)
+                                        if let los = entry.2 {
+                                            Text("LOS in \(ODFormat.duration(max(0, los.timeIntervalSinceNow)))")
+                                                .font(.caption.monospacedDigit()).foregroundStyle(ODTheme.good)
+                                        }
                                     }
                                 }
                                 .contentShape(Rectangle())
@@ -213,9 +215,9 @@ struct HomeView: View {
             }
             SectionCard("Upcoming favorite passes") {
                 let upcoming = fleetPasses.filter { $0.pass.aos > Date() }
-                    
+
                 if upcoming.isEmpty {
-                    Text(fleetLoading ? "Computing…" : "No upcoming favorite passes.")
+                    Text(fleetLoading ? "Computing…" : "No upcoming favorite passes above \(ODFormat.angle(store.preferences.minElevation)).")
                         .font(.caption).foregroundStyle(ODTheme.muted)
                 } else {
                     ForEach(upcoming.prefix(12)) { fleet in
@@ -256,17 +258,19 @@ struct HomeView: View {
         }
     }
 
-    private func overheadNow(favorites: [SatelliteRecord], at date: Date) -> [(SatelliteRecord, LiveLook, PredictedPass)] {
+    /// Favorites currently above the horizon, with the LOS of the in-progress pass
+    /// when known. The LOS comes from the already-computed `fleetPasses` rather than
+    /// a fresh pass search: that keeps SGP4 work off this 5 s main-thread timeline,
+    /// and a pass that peaks below the minimum elevation (absent from `fleetPasses`)
+    /// still lists the satellite, just without an LOS, instead of showing the next
+    /// qualifying pass's LOS or dropping the row.
+    private func overheadNow(favorites: [SatelliteRecord], at date: Date) -> [(SatelliteRecord, LiveLook, Date?)] {
         let observer = store.preferences.observer
-        let minElevation = store.preferences.minElevation
-        
-        return favorites.compactMap { (sat) -> (SatelliteRecord, LiveLook, PredictedPass)? in
+        return favorites.compactMap { (sat) -> (SatelliteRecord, LiveLook, Date?)? in
             guard let look = try? OrbitPredictor.look(sat, observer: observer, at: date),
                   look.elevation >= 0 else { return nil }
-            guard let pass = try? OrbitPredictor.predictPasses(sat, observer: observer, minElevation: minElevation, maxCount: 1).first
-            else { return nil }
-            
-            return (sat, look, pass)
+            let los = fleetPasses.first { $0.id == sat.id && $0.pass.aos <= date && $0.pass.los > date }?.pass.los
+            return (sat, look, los)
         }
         .sorted { $0.1.elevation > $1.1.elevation }
     }
