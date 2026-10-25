@@ -503,7 +503,7 @@ enum FeatureEngine {
         let onLat = abs(latitude - latBoundary) * metersPerDegLat <= toleranceMeters
         let onLon = abs(longitude - lonBoundary) * metersPerDegLon <= toleranceMeters
 
-        // A point nudged just across the nearest boundary lands in the neighbour.
+        // A point nudged just across the nearest boundary lands in the neighbor.
         let otherLat = latBoundary - (latitude >= latBoundary ? 0.001 : -0.001)
         let otherLon = lonBoundary - (longitude >= lonBoundary ? 0.001 : -0.001)
 
@@ -1630,7 +1630,7 @@ enum FeatureEngine {
     }
 
     /// Local (mean solar) Time of the Ascending Node, in hours [0,24). For a
-    /// sun-synchronous orbit this is nearly constant and characterises the bird
+    /// sun-synchronous orbit this is nearly constant and characterizes the bird
     /// (e.g. a 10:30 morning crossing). LTAN = 12h + (RAAN − α☉)/15°.
     static func localTimeOfAscendingNode(raanDeg: Double, at date: Date) -> Double {
         let sun = sunECIUnit(date.julianDate).vector

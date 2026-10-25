@@ -69,6 +69,10 @@ OrbitDeck does not collect, store, or transmit personal information to the devel
 
 SGP4/SDP4 propagation is provided by [SatelliteKit](https://github.com/gavineadie/SatelliteKit), resolved as a Swift Package dependency at build time (not vendored in this repository).
 
+## Contributing
+
+Use **American English** throughout: in the app's text, code comments, documentation and the website (color, center, behavior, canceled, catalog, analyze, …). Apple API names keep their own spelling (for example `isCancelled`).
+
 ## Support AMSAT
 
 Please consider joining or donating to [AMSAT](https://www.amsat.org) — the Radio Amateur Satellite Corporation — a volunteer, member-supported non-profit that designs, builds and helps launch the amateur-radio satellites OrbitDeck is made to track.

@@ -162,11 +162,202 @@ enum ODFormat {
     }
 
     static func distance(_ km: Double) -> String {
-        km >= 10_000 ? String(format: "%.0f km", km) : String(format: "%.1f km", km)
+        if usesCustomary {
+            let mi = km * UnitConversion.miPerKm
+            return mi >= 10_000 ? String(format: "%.0f mi", mi) : String(format: "%.1f mi", mi)
+        }
+        return km >= 10_000 ? String(format: "%.0f km", km) : String(format: "%.1f km", km)
     }
 
     static func velocity(_ kmS: Double) -> String {
-        String(format: "%+.3f km/s", kmS)
+        usesCustomary ? String(format: "%+.3f mi/s", kmS * UnitConversion.miPerKm) : String(format: "%+.3f km/s", kmS)
+    }
+
+    // MARK: Units (metric / US customary)
+
+    /// The operator's unit choice. Driven from the store (see OrbitStore.preferences).
+    nonisolated(unsafe) static var unitSystem: UnitSystem = .system
+
+    /// True when values should be shown in US customary units.
+    static var usesCustomary: Bool {
+        switch unitSystem {
+        case .metric: return false
+        case .customary: return true
+        case .system: return Locale.current.measurementSystem == .us
+        }
+    }
+
+    /// A distance in km with fixed decimals ("408.2 km" / "253.6 mi").
+    static func km(_ km: Double, decimals: Int = 1) -> String {
+        usesCustomary ? String(format: "%.*f mi", decimals, km * UnitConversion.miPerKm)
+                      : String(format: "%.*f km", decimals, km)
+    }
+
+    /// A length/height in meters ("20 m" / "66 ft").
+    static func meters(_ m: Double, decimals: Int = 0) -> String {
+        usesCustomary ? String(format: "%.*f ft", decimals, m * UnitConversion.ftPerM)
+                      : String(format: "%.*f m", decimals, m)
+    }
+
+    /// Unit label for distances ("km"/"mi") and heights ("m"/"ft").
+    static var distanceUnit: String { usesCustomary ? "mi" : "km" }
+    static var heightUnit: String { usesCustomary ? "ft" : "m" }
+
+    /// Rewrite every "number unit" in display text into the chosen system, e.g.
+    /// "Perigee 408 km · apogee 421 km" → "Perigee 254 mi · apogee 262 mi", or a
+    /// calculator's "12.34 ft" → "3.76 m" in metric. Ranges ("300–800 km") convert
+    /// both ends. Use only on text whose numbers are measurements (not band names
+    /// such as "2 m").
+    static func units(_ text: String) -> String {
+        UnitConversion.rewrite(text, toCustomary: usesCustomary)
+    }
+}
+
+/// The operator's unit system preference.
+enum UnitSystem: String, Codable, CaseIterable, Identifiable, Sendable {
+    case system, metric, customary
+    var id: String { rawValue }
+    var label: String {
+        switch self {
+        case .system: "Automatic (region)"
+        case .metric: "Metric"
+        case .customary: "US customary"
+        }
+    }
+}
+
+/// Unit conversion and the display-text rewriter behind `ODFormat.units(_:)`.
+enum UnitConversion {
+    static let miPerKm = 0.621371192
+    static let ftPerM = 3.280839895
+
+    /// metric unit → (US unit, factor, extra decimals), and the reverse.
+    private struct Rule { let from: String; let to: String; let factor: Double; let extraDecimals: Int }
+    private static let toUS: [Rule] = [
+        Rule(from: "km/s", to: "mi/s", factor: miPerKm, extraDecimals: 0),
+        Rule(from: "km/h", to: "mph", factor: miPerKm, extraDecimals: 0),
+        Rule(from: "m/s", to: "ft/s", factor: ftPerM, extraDecimals: 0),
+        Rule(from: "dB/km", to: "dB/mi", factor: 1 / miPerKm, extraDecimals: 0),
+        Rule(from: "kg/m²", to: "lb/ft²", factor: 0.204816, extraDecimals: 1),
+        Rule(from: "km²", to: "mi²", factor: 0.386102, extraDecimals: 0),
+        Rule(from: "m²", to: "ft²", factor: 10.7639, extraDecimals: 0),
+        Rule(from: "km", to: "mi", factor: miPerKm, extraDecimals: 0),
+        Rule(from: "cm", to: "in", factor: 0.393701, extraDecimals: 1),
+        Rule(from: "mm", to: "in", factor: 0.0393701, extraDecimals: 2),
+        Rule(from: "m", to: "ft", factor: ftPerM, extraDecimals: 0),
+        Rule(from: "kg", to: "lb", factor: 2.20462, extraDecimals: 0),
+    ]
+    private static let toMetric: [Rule] = [
+        Rule(from: "mi/s", to: "km/s", factor: 1 / miPerKm, extraDecimals: 0),
+        Rule(from: "mph", to: "km/h", factor: 1 / miPerKm, extraDecimals: 0),
+        Rule(from: "ft/s", to: "m/s", factor: 1 / ftPerM, extraDecimals: 0),
+        Rule(from: "dB/mi", to: "dB/km", factor: miPerKm, extraDecimals: 0),
+        Rule(from: "mi²", to: "km²", factor: 1 / 0.386102, extraDecimals: 0),
+        Rule(from: "ft²", to: "m²", factor: 1 / 10.7639, extraDecimals: 1),
+        Rule(from: "mi", to: "km", factor: 1 / miPerKm, extraDecimals: 0),
+        // Feet are smaller than meters: one more decimal keeps the precision.
+        // (No "in" → cm rule: "in" is too common an English word to rewrite safely.)
+        Rule(from: "ft", to: "m", factor: 1 / ftPerM, extraDecimals: 1),
+        Rule(from: "lb", to: "kg", factor: 1 / 2.20462, extraDecimals: 0),
+    ]
+
+    nonisolated(unsafe) private static var regexCache: [Bool: NSRegularExpression] = [:]
+
+    private static func regex(toCustomary: Bool) -> NSRegularExpression {
+        if let r = regexCache[toCustomary] { return r }
+        let rules = toCustomary ? toUS : toMetric
+        let units = (rules.map(\.from) + [toCustomary ? "°C" : "°F"])
+            .sorted { $0.count > $1.count }
+            .map(NSRegularExpression.escapedPattern(for:))
+            .joined(separator: "|")
+        let number = #"[+\-−]?(?:\d{1,3}(?:,\d{3})+|\d+)(?:\.\d+)?"#
+        // Optional "low–" for ranges, the number, optional space, the unit, and no
+        // letter/superscript/slash straight after (so "min" isn't "mi", "ms" isn't "m").
+        let pattern = #"(?<![\w.])(?:("# + number + #")(\s?[–\-]\s?))?("# + number + #")(\s?)("# + units + #")(?![\p{L}\d²³/])"#
+        let r = try! NSRegularExpression(pattern: pattern)
+        regexCache[toCustomary] = r
+        return r
+    }
+
+    static func rewrite(_ text: String, toCustomary: Bool) -> String {
+        let r = regex(toCustomary: toCustomary)
+        let ns = text as NSString
+        var out = ""
+        var cursor = 0
+        for m in r.matches(in: text, range: NSRange(location: 0, length: ns.length)) {
+            out += ns.substring(with: NSRange(location: cursor, length: m.range.location - cursor))
+            let unit = ns.substring(with: m.range(at: 5))
+            let space = ns.substring(with: m.range(at: 4))
+            let value = ns.substring(with: m.range(at: 3))
+            if unit == "°C" || unit == "°F" {
+                let toF = unit == "°C"
+                out += convertTemperature(value, toF: toF) + space + (toF ? "°F" : "°C")
+            } else if let rule = (toCustomary ? toUS : toMetric).first(where: { $0.from == unit }) {
+                var piece = ""
+                if m.range(at: 1).location != NSNotFound {
+                    piece += convert(ns.substring(with: m.range(at: 1)), rule) + ns.substring(with: m.range(at: 2))
+                }
+                piece += convert(value, rule) + space + rule.to
+                out += piece
+            } else {
+                out += ns.substring(with: m.range)
+            }
+            cursor = m.range.location + m.range.length
+        }
+        out += ns.substring(from: cursor)
+        return out
+    }
+
+    private static func parse(_ s: String) -> (value: Double, decimals: Int, grouped: Bool, sign: String)? {
+        var t = s
+        var sign = ""
+        if let f = t.first, "+-−".contains(f) { sign = String(f); t.removeFirst() }
+        let grouped = t.contains(",")
+        t = t.replacingOccurrences(of: ",", with: "")
+        guard let v = Double(t) else { return nil }
+        let decimals = t.split(separator: ".").count == 2 ? t.split(separator: ".")[1].count : 0
+        return (v, decimals, grouped, sign)
+    }
+
+    private static func format(_ v: Double, decimals: Int, grouped: Bool) -> String {
+        if grouped {
+            let f = NumberFormatter()
+            f.numberStyle = .decimal; f.usesGroupingSeparator = true; f.groupingSeparator = ","
+            f.decimalSeparator = "."; f.minimumFractionDigits = decimals; f.maximumFractionDigits = decimals
+            return f.string(from: NSNumber(value: v)) ?? String(format: "%.*f", decimals, v)
+        }
+        return String(format: "%.*f", decimals, v)
+    }
+
+    private static func convert(_ s: String, _ rule: Rule) -> String {
+        guard let p = parse(s) else { return s }
+        return p.sign + format(p.value * rule.factor, decimals: min(6, p.decimals + rule.extraDecimals), grouped: p.grouped)
+    }
+
+    private static func convertTemperature(_ s: String, toF: Bool) -> String {
+        guard let p = parse(s) else { return s }
+        let signed = (p.sign == "-" || p.sign == "−") ? -p.value : p.value
+        let v = toF ? signed * 9 / 5 + 32 : (signed - 32) * 5 / 9
+        return (v >= 0 && p.sign == "+" ? "+" : "") + format(v, decimals: p.decimals, grouped: false)
+    }
+
+    /// Input conversion for a field stored in `metricUnit`: the unit to show and
+    /// the conversions both ways, or nil if the unit isn't converted.
+    static func inputConversion(for storedUnit: String, toCustomary: Bool)
+        -> (shown: String, toShown: (Double) -> Double, toStored: (Double) -> Double)? {
+        if storedUnit == "°C", toCustomary { return ("°F", { $0 * 9 / 5 + 32 }, { ($0 - 32) * 5 / 9 }) }
+        let rules = toCustomary ? toUS : toMetric
+        guard let rule = rules.first(where: { $0.from == storedUnit }) else { return nil }
+        let f = rule.factor
+        return (rule.to, { $0 * f }, { $0 / f })
+    }
+}
+
+// The rest of ODFormat (frequency, duration, compass, …) continues below.
+extension ODFormat {
+    /// The unit a value stored in `metricUnit` is shown in under the current setting.
+    static func unitsLabel(_ metricUnit: String) -> String {
+        UnitConversion.inputConversion(for: metricUnit, toCustomary: usesCustomary)?.shown ?? metricUnit
     }
 
     static func frequency(_ hz: Int64) -> String {
@@ -380,13 +571,13 @@ struct PolarSkyPlot: View {
     /// analytically — so it stays correct even when consecutive samples project to
     /// a sub-pixel step (a HEO satellite crawling near apogee), which used to
     /// collapse the old pixel-threshold fallback into a bogus constant. Searches
-    /// outward for a neighbour with a meaningful angular separation.
+    /// outward for a neighbor with a meaningful angular separation.
     private func headingAngle(for point: SkyPoint, outerRadius: Double) -> Double? {
         guard points.count > 1 else { return nil }
         var i = 0
         for k in 0..<points.count where points[k].date <= point.date { i = k }
         let minDelta = 0.05     // degrees (combined az+el) that counts as real motion
-        // Forward neighbour first (direction of travel), then backward.
+        // Forward neighbor first (direction of travel), then backward.
         for j in (i + 1)..<points.count {
             let dAz = angularDeltaDeg(points[j].azimuth - point.azimuth)
             let dEl = points[j].elevation - point.elevation
@@ -408,7 +599,7 @@ struct PolarSkyPlot: View {
     /// the analytic derivative of `plotPoint` (`x = r·sinθ`, `y = −r·cosθ`, with
     /// `θ = (az−orientation)·π/180`, `r = R·(90−el)/90`). Near the zenith `r → 0`
     /// so the `r·dθ` terms vanish and the arrow follows the stable radial `dEl`
-    /// motion instead of the ill-defined azimuth — exactly the desired behaviour.
+    /// motion instead of the ill-defined azimuth — exactly the desired behavior.
     private func screenTangent(atAz az: Double, atEl el: Double, dAzDeg: Double, dElDeg: Double, outerRadius: Double) -> Double? {
         let dTheta = atan2(sin(dAzDeg * .pi / 180), cos(dAzDeg * .pi / 180))   // short way around, radians
         if abs(dTheta) < 1e-9 && abs(dElDeg) < 1e-9 { return nil }
@@ -429,7 +620,7 @@ struct PolarSkyPlot: View {
     }
 }
 
-/// A small, unobtrusive bell toggle for scheduling (or cancelling) a local pass
+/// A small, unobtrusive bell toggle for scheduling (or canceling) a local pass
 /// reminder for one pass. Filled bell = a reminder is pending. Shows an alert only
 /// on error (e.g. notifications denied, or the pass is too close). Designed to sit
 /// beside a pass listing anywhere in the app.

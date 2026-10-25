@@ -71,7 +71,7 @@ final class BLESerialTransport: NSObject, CATTransport, @unchecked Sendable {
                                          write: "00000002-BA2A-46C9-AE49-01B0961F68BB",
                                          notify: "00000003-BA2A-46C9-AE49-01B0961F68BB")
     }
-    /// nil = the CAT behaviour: prefer NUS, else the first write/notify pair found.
+    /// nil = the CAT behavior: prefer NUS, else the first write/notify pair found.
     private let binding: GATTBinding?
 
     private let identifier: UUID

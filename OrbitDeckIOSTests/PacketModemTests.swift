@@ -85,7 +85,67 @@ struct APRSTests {
     }
 }
 
+struct APRSExtrasTests {
+    @Test func positionAmbiguityBlanksTrailingDigits() {
+        // 38°54.12'N 77°02.34'W at ambiguity 2 (≈1.85 km) → hundredths blanked.
+        let info = APRS.position(latitude: 38 + 54.12 / 60, longitude: -(77 + 2.34 / 60), comment: "x", ambiguity: 2)
+        #expect(info == "=3854.  N/07702.  W`x")
+        let exact = APRS.position(latitude: 38 + 54.129 / 60, longitude: -(77 + 2.349 / 60))
+        #expect(exact == "=3854.13N/07702.35W`")      // exact positions round to 0.01'
+        // Blanked digits truncate (never round up into the next area).
+        #expect(APRS.position(latitude: 38 + 54.99 / 60, longitude: -77, ambiguity: 2) == "=3854.  N/07700.  W`")
+        // Ambiguous positions still parse (spaces read as zeros).
+        let p = APRS.parse(info)
+        #expect(p.kind == .position && abs((p.latitude ?? 0) - 38.9) < 0.01)
+    }
+
+    @Test func gridBeaconTelemetryAndLatePosition() {
+        let g = APRS.parse("[FM18]Hello")
+        #expect(g.kind == .position && g.grid == "FM18" && g.comment == "Hello")
+        #expect(abs((g.latitude ?? 0) - 38.5) < 0.01 && abs((g.longitude ?? 0) + 77) < 0.01)
+        #expect(APRS.parse("T#005,199,000,255,073,123,01101001").kind == .telemetry)
+        let late = APRS.parse("Hi all !3854.00N/07702.00W-")
+        #expect(late.kind == .position && abs((late.latitude ?? 0) - 38.9) < 0.001)
+        #expect(APRS.parse("=3854.00N/07702.00W`comment /A=001234").altitudeFeet == 1234)
+    }
+
+    @Test func plainTextHeuristics() {
+        #expect(PacketText.grid(in: "CQ FM18 de N8HM") == "FM18")
+        #expect(PacketText.grid(in: "RR73 thanks") == nil)
+        #expect(PacketText.report(in: "N8HM FM18 R599") == "599")
+        #expect(PacketText.isRoger("R 599 FN31") && PacketText.isRoger("RR73"))
+        #expect(PacketText.isSignOff("73 TU") && !PacketText.isSignOff("CQ FM18"))
+        #expect(PacketText.isCQ("cq fm18"))
+        let c = PacketText.gridCenter("FM18LV")
+        #expect(abs((c?.latitude ?? 0) - 38.896) < 0.01 && abs((c?.longitude ?? 0) + 77.04) < 0.01)
+    }
+
+    @Test func uissStyleFrameRoundTrip() throws {
+        // N8HM-6>CQ,ARISS:CQ FM18 — destination CQ, info = free text.
+        let frame = AX25Frame(destination: try #require(AX25Address("CQ")), source: AX25Address(call: "N8HM", ssid: 6),
+                              digipeaters: [AX25Address(call: "ARISS")], info: Array("CQ FM18".utf8))
+        let back = try #require(AX25Frame.decode(frame.encoded()))
+        #expect(back.monitorText == "N8HM-6>CQ,ARISS:CQ FM18")
+        #expect(APRS.parse(back.infoText).kind == .other)   // not APRS: shown as plain text
+    }
+}
+
 struct AFSKModemTests {
+    @Test func offsetBanksRecoverMistunedSignal() {
+        // Both tones 400 Hz high (beyond what the nominal correlators tolerate).
+        let fs = 48_000.0
+        let frame = AX25Frame(destination: AX25Address(call: "CQ"), source: AX25Address(call: "N8HM"),
+                              info: Array("Off-frequency test".utf8))
+        let tones = HDLC.encode(frame.encoded(), preambleFlags: 24)
+        var phase = 0.0, clock = 0.0, audio: [Float] = []
+        for t in tones {
+            let step = 2 * Double.pi * ((t ? 1200 : 2200) + 400) / fs
+            clock += fs / 1200
+            while clock >= 1 { audio.append(Float(sin(phase)) * 0.4); phase += step; clock -= 1 }
+        }
+        #expect(AFSKDemodulator(sampleRate: fs).process(audio) == [frame])
+    }
+
     private func testFrame(_ text: String = "Hello via satellite") -> AX25Frame {
         AX25Frame(destination: AX25Address(call: "APZODK"), source: AX25Address(call: "N8HM", ssid: 7),
                   digipeaters: [AX25Address(call: "ARISS")], info: Array(text.utf8))
@@ -115,7 +175,7 @@ struct AFSKModemTests {
 
     @Test func survivesNoiseAndDeEmphasisTilt() {
         let fs = 48_000.0
-        let frame = testFrame("De-emphasised audio with noise, like an FM receiver's speaker output")
+        let frame = testFrame("De-emphasized audio with noise, like an FM receiver's speaker output")
         var audio = AFSKModulator.transmission(frame, sampleRate: fs, txDelayMs: 300, amplitude: 0.4)
         // Tilt: a one-pole low-pass (~1 kHz) cuts the 2200 Hz space tone ~5 dB more than mark.
         var y: Float = 0

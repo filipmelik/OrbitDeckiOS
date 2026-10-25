@@ -8,7 +8,19 @@ struct DeepToolsView: View {
     @EnvironmentObject private var store: OrbitStore
     @State private var selected = BenchTools.allTools.first!.id
     @State private var values: [String: String] = [:]
+    /// What the operator typed in display units (metric or US customary), kept
+    /// separately so a half-typed value isn't reformatted mid-entry. `values`
+    /// always holds the tool's own (stored) units.
+    @State private var shownText: [String: String] = [:]
     @State private var exportMessage = ""
+
+    /// Unit conversion for a field, unless the tool is the unit converter itself.
+    private func conversion(_ field: ToolField) -> (shown: String, toShown: (Double) -> Double, toStored: (Double) -> Double)? {
+        guard spec.id != "unitConverter" else { return nil }
+        return UnitConversion.inputConversion(for: field.unit, toCustomary: ODFormat.usesCustomary)
+    }
+
+    private func display(_ text: String) -> String { spec.id == "unitConverter" ? text : ODFormat.units(text) }
 
     private var spec: ToolDefinition {
         BenchTools.allTools.first { $0.id == selected } ?? BenchTools.allTools[0]
@@ -43,7 +55,7 @@ struct DeepToolsView: View {
                     ForEach(categories, id: \.self) { category in
                         Section(category) {
                             ForEach(BenchTools.allTools.filter { $0.category == category }) { tool in
-                                Button(tool.name) { selected = tool.id; values = [:] }
+                                Button(tool.name) { selected = tool.id; values = [:]; shownText = [:] }
                             }
                         }
                     }
@@ -92,6 +104,20 @@ struct DeepToolsView: View {
                                 .labelsHidden()
                                 .pickerStyle(.menu)
                                 .frame(maxWidth: .infinity, alignment: .leading)
+                            } else if let conv = conversion(field) {
+                                let stored = Double(values[field.id] ?? "") ?? field.defaultValue
+                                let initial = String(format: "%g", conv.toShown(stored))
+                                TextField(String(format: "%g", conv.toShown(field.defaultValue)), text: Binding(
+                                    get: { shownText[field.id] ?? initial },
+                                    set: { text in
+                                        shownText[field.id] = text
+                                        if let v = Double(text.replacingOccurrences(of: ",", with: ".")) {
+                                            values[field.id] = String(conv.toStored(v))
+                                        }
+                                    }
+                                ))
+                                .textFieldStyle(.odField)
+                                .keyboardType(.numbersAndPunctuation)
                             } else {
                                 TextField(String(field.defaultValue), text: Binding(
                                     get: { values[field.id] ?? String(field.defaultValue) },
@@ -100,7 +126,7 @@ struct DeepToolsView: View {
                                 .textFieldStyle(.odField)
                                 .keyboardType(.numbersAndPunctuation)
                             }
-                            Text(field.unit).foregroundStyle(ODTheme.muted).frame(width: 65, alignment: .leading)
+                            Text(conversion(field)?.shown ?? field.unit).foregroundStyle(ODTheme.muted).frame(width: 65, alignment: .leading)
                         }
                     }
                     Divider()
@@ -109,8 +135,8 @@ struct DeepToolsView: View {
                         HStack(alignment: .firstTextBaseline) {
                             Text(result.label).foregroundStyle(ODTheme.muted).frame(width: 155, alignment: .leading)
                             VStack(alignment: .leading) {
-                                Text(result.value).font(.body.monospacedDigit())
-                                if !result.note.isEmpty { Text(result.note).font(.caption).foregroundStyle(ODTheme.muted) }
+                                Text(display(result.value)).font(.body.monospacedDigit())
+                                if !result.note.isEmpty { Text(display(result.note)).font(.caption).foregroundStyle(ODTheme.muted) }
                             }
                         }
                     }
@@ -521,7 +547,7 @@ struct DeepLearnView: View {
                     HStack {
                         VStack(alignment: .leading) {
                             Text("Shared OSCARLOCATOR lab orbit").font(.headline)
-                            Text(String(format: "%.0f km • e %.3f • i %.1f° • Ω %.1f° • ω %.1f° • M %.1f°", lab.altitudeKm, lab.eccentricity, lab.inclinationDeg, lab.raanDeg, lab.argumentOfPerigeeDeg, lab.meanAnomalyDeg)).font(.caption.monospacedDigit()).foregroundStyle(ODTheme.muted)
+                            Text(ODFormat.units(String(format: "%.0f km • e %.3f • i %.1f° • Ω %.1f° • ω %.1f° • M %.1f°", lab.altitudeKm, lab.eccentricity, lab.inclinationDeg, lab.raanDeg, lab.argumentOfPerigeeDeg, lab.meanAnomalyDeg))).font(.caption.monospacedDigit()).foregroundStyle(ODTheme.muted)
                         }
                         Spacer()
                         Button("Use throughout Learn") {
@@ -576,7 +602,7 @@ struct DeepLearnView: View {
             case .speed:
                 Text("Why low satellites move faster").font(.title2.bold())
                 slider("Circular altitude", $altitude, 100...40000, "km")
-                metric("Orbital speed", String(format: "%.3f km/s", LearnMath.circularSpeed(altitudeKm: altitude)))
+                metric("Orbital speed", ODFormat.units(String(format: "%.3f km/s", LearnMath.circularSpeed(altitudeKm: altitude))))
                 metric("Period", String(format: "%.1f min", LearnMath.circularPeriodMinutes(altitudeKm: altitude)))
                 Chart(Array(stride(from: 100, through: 40000, by: 500).enumerated()).map { GraphPoint(id: $0.offset, x: Double($0.element), y: LearnMath.circularSpeed(altitudeKm: Double($0.element))) }) { p in if let y=p.y { LineMark(x:.value("Altitude",p.x),y:.value("Speed",y)) } }.frame(height:260)
             case .transfer:
@@ -586,9 +612,9 @@ struct DeepLearnView: View {
                 slider("Plane change", $planeChange, 0...90, "°")
                 let h = LearnMath.hohmannTransfer(r1Km: LearnMath.earthRadiusKm + altitude, r2Km: LearnMath.earthRadiusKm + altitude2)
                 let speed = LearnMath.circularSpeed(altitudeKm: altitude2)
-                metric("Transfer Δv", String(format: "%.3f km/s", h.total))
+                metric("Transfer Δv", ODFormat.units(String(format: "%.3f km/s", h.total)))
                 metric("Transfer time", String(format: "%.1f min", h.minutes))
-                metric("Plane-change Δv", String(format: "%.3f km/s", LearnMath.planeChangeDeltaV(speedKmS: speed, angleDeg: planeChange)))
+                metric("Plane-change Δv", ODFormat.units(String(format: "%.3f km/s", LearnMath.planeChangeDeltaV(speedKmS: speed, angleDeg: planeChange))))
                 Text("Plane changes are cheapest where orbital speed is lowest; large inclination changes can cost more Δv than raising an orbit.").foregroundStyle(ODTheme.muted)
             case .elementAge:
                 Text("Why element age matters").font(.title2.bold())
@@ -607,7 +633,7 @@ struct DeepLearnView: View {
                         Text("Low").tag(0.0); Text("Mean").tag(1.0); Text("High").tag(2.0)
                     }.pickerStyle(.segmented)
                     let estimate = LearnMath.decayEstimate(meanMotion: sat.meanMotionRevPerDay, eccentricity: sat.eccentricity, bstar: sat.bstar, solarIndex: Int(solarIndex))
-                    metric("Perigee", String(format: "%.0f km", sat.perigeeKm))
+                    metric("Perigee", ODFormat.units(String(format: "%.0f km", sat.perigeeKm)))
                     metric("B*", String(format: "%.6g", sat.bstar))
                     metric("Anchor", estimate.source)
                     metric("Lifetime", estimate.days < 0 ? "no usable data" : estimate.days.isInfinite ? "effectively stable" : estimate.days < 365.25 ? String(format: "%.0f days", estimate.days) : String(format: "%.1f years", estimate.days/365.25))
@@ -616,13 +642,13 @@ struct DeepLearnView: View {
             case .horizon:
                 Text("How altitude expands the footprint").font(.title2.bold())
                 slider("Altitude", $altitude, 100...40000, "km")
-                metric("Horizon radius", String(format: "%.0f km", LearnMath.horizonRadiusKm(altitudeKm: altitude)))
+                metric("Horizon radius", ODFormat.units(String(format: "%.0f km", LearnMath.horizonRadiusKm(altitudeKm: altitude))))
                 metric("Angular radius", String(format: "%.1f°", LearnMath.horizonRadiusKm(altitudeKm: altitude) / LearnMath.earthRadiusKm * 180 / .pi))
             case .slant:
                 Text("Why range changes strongly near the horizon").font(.title2.bold())
                 slider("Altitude", $altitude, 100...2000, "km")
                 slider("Elevation", $elevation, 0...90, "°")
-                metric("Slant range", String(format: "%.0f km", LearnMath.slantRangeKm(altitudeKm: altitude, elevationDeg: elevation)))
+                metric("Slant range", ODFormat.units(String(format: "%.0f km", LearnMath.slantRangeKm(altitudeKm: altitude, elevationDeg: elevation))))
                 Chart((0...90).enumerated().map { GraphPoint(id:$0.offset,x:Double($0.element),y:LearnMath.slantRangeKm(altitudeKm:altitude,elevationDeg:Double($0.element))) }) { p in if let y=p.y { LineMark(x:.value("Elevation",p.x),y:.value("Range",y)) } }.frame(height:260)
             case .drift:
                 Text("Earth turns beneath each orbit").font(.title2.bold())
@@ -881,7 +907,7 @@ struct DeepLearnView: View {
     }
 
     @ViewBuilder private func slider(_ label:String,_ value:Binding<Double>,_ range:ClosedRange<Double>,_ unit:String)->some View {
-        VStack(alignment:.leading){Text("\(label): \(value.wrappedValue,specifier:"%.1f") \(unit)").font(.caption.monospacedDigit());Slider(value:value,in:range)}
+        VStack(alignment:.leading){Text(ODFormat.units("\(label): \(String(format: "%.1f", value.wrappedValue)) \(unit)")).font(.caption.monospacedDigit());Slider(value:value,in:range)}
     }
     private func metric(_ label:String,_ value:String)->some View { HStack{Text(label).foregroundStyle(ODTheme.muted);Spacer();Text(value).font(.body.monospacedDigit())} }
 }

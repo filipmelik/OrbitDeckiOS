@@ -68,7 +68,7 @@ struct IlluminationView: View {
 
                         SectionCard("Illumination geometry") {
                             MetricRow("Beta angle", String(format: "%+.3f°", look.betaAngleDeg))
-                            MetricRow("Satellite altitude", String(format: "%.1f km", look.altitudeKm))
+                            MetricRow("Satellite altitude", ODFormat.units(String(format: "%.1f km", look.altitudeKm)))
                             MetricRow("Station elevation", ODFormat.angle(look.elevation))
                             MetricRow("Visible from station", look.visible ? "Yes" : "No",
                                       valueColor: look.visible ? ODTheme.good : ODTheme.muted)

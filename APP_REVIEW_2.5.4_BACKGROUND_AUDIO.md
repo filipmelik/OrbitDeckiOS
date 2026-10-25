@@ -36,7 +36,7 @@ the reviewer can verify background audio with **no amateur-radio hardware at all
 > partway through one. Three features must keep processing audio for the full pass:
 >
 > 1. **Pass recording** — records the radio's received audio to an AAC file for the
->    whole pass, so the operator can review weak signals afterwards.
+>    whole pass, so the operator can review weak signals afterward.
 > 2. **SSTV and FT4 decoding** — continuously demodulate the received audio to recover
 >    slow-scan television images and FT4 digital-mode messages. FT4 also synthesizes and
 >    plays transmit audio out to the radio on a 7.5-second cadence.

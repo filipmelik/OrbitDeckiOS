@@ -89,7 +89,7 @@ struct OscarLocatorView: View {
                     Image(systemName: "testtube.2")
                     Text("LAB-SAT").font(.headline)
                     Spacer()
-                    Text(String(format: "%.0f km · i %.1f° · e %.3f", labAltitudeKm, labInclination, labEccentricity))
+                    Text(ODFormat.units(String(format: "%.0f km · i %.1f° · e %.3f", labAltitudeKm, labInclination, labEccentricity)))
                         .font(.caption.monospacedDigit()).foregroundStyle(ODTheme.muted)
                 }.padding(.horizontal).padding(.vertical, 8).background(ODTheme.panel)
             } else {
@@ -199,7 +199,7 @@ struct OscarLocatorView: View {
                     labSlider("Arg. perigee", value: $labArgumentOfPerigee, range: 0...360, unit: "°")
                     labSlider("Mean anomaly", value: $labMeanAnomaly, range: 0...360, unit: "°")
                     if let sat = activeSatellite {
-                        Text(String(format: "Period %.1f min · perigee %.0f km · apogee %.0f km", sat.periodMinutes, sat.perigeeKm, sat.apogeeKm))
+                        Text(ODFormat.units(String(format: "Period %.1f min · perigee %.0f km · apogee %.0f km", sat.periodMinutes, sat.perigeeKm, sat.apogeeKm)))
                             .font(.caption.monospacedDigit()).foregroundStyle(ODTheme.muted)
                         Text(labOrbitType).font(.caption).foregroundStyle(ODTheme.good)
                     }
@@ -222,7 +222,7 @@ struct OscarLocatorView: View {
                     } label: { Label("Guided challenge", systemImage: "graduationcap") }
                     if let challenge {
                         Text(challenge.rawValue).font(.caption.bold())
-                        Text(challenge.hint).font(.caption).foregroundStyle(ODTheme.muted)
+                        Text(ODFormat.units(challenge.hint)).font(.caption).foregroundStyle(ODTheme.muted)
                         Label(challengeComplete(challenge) ? "Challenge complete" : "Adjust the elements to meet the goal", systemImage: challengeComplete(challenge) ? "checkmark.seal.fill" : "circle.dashed")
                             .font(.caption).foregroundStyle(challengeComplete(challenge) ? ODTheme.good : ODTheme.warning)
                     }
@@ -398,7 +398,7 @@ struct OscarLocatorView: View {
 
     @ViewBuilder private func labSlider(_ label: String, value: Binding<Double>, range: ClosedRange<Double>, unit: String) -> some View {
         VStack(alignment: .leading, spacing: 2) {
-            Text("\(label): \(String(format: unit.isEmpty ? "%.3f" : "%.1f", value.wrappedValue)) \(unit)")
+            Text(ODFormat.units("\(label): \(String(format: unit.isEmpty ? "%.3f" : "%.1f", value.wrappedValue)) \(unit)"))
                 .font(.caption.monospacedDigit())
             Slider(value: value, in: range)
         }

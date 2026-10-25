@@ -21,14 +21,25 @@ private final class TrackArcCache {
 /// switch (SatPC32's A+/A- button). Hidden when the feature is off.
 private struct AutoSwitchBanner: View {
     @EnvironmentObject private var auto: AutoSwitchController
+    @EnvironmentObject private var store: OrbitStore
 
     var body: some View {
         if auto.settings.enabled {
-            HStack(spacing: 8) {
+            HStack(alignment: .top, spacing: 8) {
                 Image(systemName: "arrow.triangle.swap").foregroundStyle(ODTheme.good)
-                Text("AUTO").font(.caption.weight(.bold)).foregroundStyle(ODTheme.good)
-                Text(auto.status).font(.caption).foregroundStyle(ODTheme.muted)
-                    .lineLimit(1).minimumScaleFactor(0.8)
+                VStack(alignment: .leading, spacing: 2) {
+                    HStack(spacing: 6) {
+                        Text("AUTO").font(.caption.weight(.bold)).foregroundStyle(ODTheme.good)
+                        Text(auto.status).font(.caption).foregroundStyle(ODTheme.muted)
+                            .lineLimit(1).minimumScaleFactor(0.8)
+                    }
+                    // Re-render each 30 s so "in N min" stays current.
+                    TimelineView(.periodic(from: .now, by: 30)) { context in
+                        Text(nextLine(now: context.date))
+                            .font(.caption2).foregroundStyle(ODTheme.muted)
+                            .lineLimit(2).minimumScaleFactor(0.85)
+                    }
+                }
                 Spacer()
                 Button("Turn off") { auto.settings.enabled = false }
                     .font(.caption)
@@ -36,6 +47,32 @@ private struct AutoSwitchBanner: View {
             }
             .padding(.horizontal)
             .accessibilityElement(children: .combine)
+        }
+    }
+
+    private func name(_ norad: UInt) -> String { store.satellites.first { $0.id == norad }?.name ?? "NORAD \(norad)" }
+
+    /// "Next: AO-91 at 14:05 UTC (in 12 min) when it reaches 10°" — worded from the
+    /// rule that will fire, using the elevations actually configured.
+    private func nextLine(now: Date) -> String {
+        guard let next = auto.nextSwitch, next.date > now else {
+            let switchIn = ODFormat.angle(auto.threshold(for: store), decimals: 0)
+            return auto.settings.priorities.isEmpty
+                ? "Add priority satellites in Auto Switching."
+                : "No switch in the next \(Int(AutoSwitchController.lookAheadHours)) h. Switches in at \(switchIn)."
+        }
+        let minutes = max(1, Int((next.date.timeIntervalSince(now) / 60).rounded()))
+        let when = "\(ODFormat.primaryClock(next.date)) (in \(minutes < 90 ? "\(minutes) min" : String(format: "%.1f h", Double(minutes) / 60)))"
+        let target = name(next.norad)
+        switch next.reason {
+        case .reachedMinimum:
+            return "Next: \(target) at \(when), when it reaches \(ODFormat.angle(auto.threshold(for: store), decimals: 0))."
+        case .preempted(let from):
+            let el = auto.settings.preemptElevation
+            let at = el == 0 ? "at AOS (0°)" : (el < 0 ? "at \(ODFormat.angle(el, decimals: 0)), before AOS" : "at \(ODFormat.angle(el, decimals: 0))")
+            return "Next: \(target) at \(when), taking over from \(name(from)) \(at)."
+        case .fellBack(let from):
+            return "Next: \(target) at \(when), when \(name(from)) sets."
         }
     }
 }
@@ -146,7 +183,7 @@ struct HomeView: View {
     @State private var fleetRefreshEpoch = 0
     // The sky-track arc and its pass are memoized inline by the live TimelineView
     // (see resolveTrack) rather than loaded via a `.task`. On this device a `.task`
-    // can be cancelled by the split-view navigation transition, which left the arc
+    // can be canceled by the split-view navigation transition, which left the arc
     // empty (the satellite dot still drew, from the inline look, but the polar path
     // did not). Computing it in the reliably-firing TimelineView fixes that.
     @State private var arcCache = TrackArcCache()
@@ -221,7 +258,7 @@ struct HomeView: View {
                                 MetricRow("Secondary subdivision", secondary)
                             }
                         }
-                        MetricRow("Altitude", String(format: "%.0f m", store.preferences.observer.altitudeMeters))
+                        MetricRow("Altitude", ODFormat.units(String(format: "%.0f m", store.preferences.observer.altitudeMeters)))
                         MetricRow("Minimum elevation", ODFormat.angle(store.preferences.minElevation))
                     }
 
@@ -257,8 +294,8 @@ struct HomeView: View {
                         MetricRow("Epoch", ODFormat.utc.string(from: satellite.epoch))
                         MetricRow("Period", String(format: "%.2f min", satellite.periodMinutes))
                         MetricRow("Inclination", ODFormat.angle(satellite.inclinationDeg, decimals: 3))
-                        MetricRow("Perigee", String(format: "%.0f km", satellite.perigeeKm))
-                        MetricRow("Apogee", String(format: "%.0f km", satellite.apogeeKm))
+                        MetricRow("Perigee", ODFormat.units(String(format: "%.0f km", satellite.perigeeKm)))
+                        MetricRow("Apogee", ODFormat.units(String(format: "%.0f km", satellite.apogeeKm)))
                     }
                 } else {
                     LoadingOrError(
@@ -937,7 +974,7 @@ struct GridFinderView: View {
             MetricRow("Grid (8)", g.grid8)
             MetricRow("Latitude", String(format: "%+.6f°", lat))
             MetricRow("Longitude", String(format: "%+.6f°", lon))
-            MetricRow("Altitude", fix.verticalAccuracy >= 0 ? String(format: "%.0f m", fix.altitude) : "—")
+            MetricRow("Altitude", fix.verticalAccuracy >= 0 ? ODFormat.units(String(format: "%.0f m", fix.altitude)) : "—")
             if let entity = location.entity, entity.hasAnything {
                 MetricRow("DXCC", entity.dxccLabel ?? "—", valueColor: ODTheme.good)
                 if let primary = entity.primarySubdivision {
@@ -971,8 +1008,8 @@ struct GridFinderView: View {
         SectionCard("Both boundary lines") {
             MetricRow("Latitude line (\(g.latLineDirection))", metersString(g.latLineDistance))
             MetricRow("Longitude line (\(g.lonLineDirection))", metersString(g.lonLineDistance))
-            Text(String(format: "VUCC counts a fix within %.1f m of a line as on it (ARRL 20-ft rule).",
-                        FeatureEngine.vuccBoundaryToleranceMeters))
+            Text(ODFormat.units(String(format: "VUCC counts a fix within %.1f m of a line as on it (ARRL 20-ft rule).",
+                        FeatureEngine.vuccBoundaryToleranceMeters)))
                 .font(.caption).foregroundStyle(ODTheme.muted)
         }
 
@@ -986,13 +1023,13 @@ struct GridFinderView: View {
 
         SectionCard("Fix quality") {
             MetricRow("Horizontal accuracy",
-                      String(format: "± %.1f m", fix.horizontalAccuracy),
+                      ODFormat.units(String(format: "± %.1f m", fix.horizontalAccuracy)),
                       valueColor: accuracyColor(fix.horizontalAccuracy))
-            MetricRow("Vertical accuracy", fix.verticalAccuracy >= 0 ? String(format: "± %.1f m", fix.verticalAccuracy) : "—")
-            MetricRow("Speed", fix.speed >= 0 ? String(format: "%.1f m/s", fix.speed) : "—")
+            MetricRow("Vertical accuracy", fix.verticalAccuracy >= 0 ? ODFormat.units(String(format: "± %.1f m", fix.verticalAccuracy)) : "—")
+            MetricRow("Speed", fix.speed >= 0 ? ODFormat.units(String(format: "%.1f m/s", fix.speed)) : "—")
             MetricRow("Heading", location.heading.map { String(format: "%.0f° %@", $0, cardinal($0)) } ?? "—")
             let vuccGrade = fix.horizontalAccuracy <= FeatureEngine.vuccBoundaryToleranceMeters
-            MetricRow("VUCC-grade fix", vuccGrade ? "Yes (≤ 6.1 m)" : "No",
+            MetricRow("VUCC-grade fix", vuccGrade ? ODFormat.units("Yes (≤ 6.1 m)") : "No",
                       valueColor: vuccGrade ? ODTheme.good : ODTheme.warning)
             MetricRow("Fix age", String(format: "%.0f s", max(0, -fix.timestamp.timeIntervalSinceNow)))
         }
@@ -1090,7 +1127,7 @@ struct GridFinderView: View {
     // MARK: Formatting helpers
 
     private func metersString(_ m: Double) -> String {
-        m < 1000 ? String(format: "%.0f m", m) : String(format: "%.2f km", m / 1000)
+        m < 1000 ? ODFormat.units(String(format: "%.0f m", m)) : ODFormat.units(String(format: "%.2f km", m / 1000))
     }
 
     private func cardinal(_ deg: Double) -> String {

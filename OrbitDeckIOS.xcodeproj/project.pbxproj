@@ -56,6 +56,9 @@
 		2E14383E303F15A60001B31F /* text.c in Sources */ = {isa = PBXBuildFile; fileRef = 2E14382E303F15A60001B31F /* text.c */; };
 		2E75B92E303228E000338037 /* PrivacyInfo.xcprivacy in Resources */ = {isa = PBXBuildFile; fileRef = 2E75B92D303228E000338037 /* PrivacyInfo.xcprivacy */; };
 		2E946B4130308C7600960A39 /* Assets.xcassets in Resources */ = {isa = PBXBuildFile; fileRef = 2E946B4030308C7600960A39 /* Assets.xcassets */; };
+		2EF6017B308E897800906C11 /* WidgetKit.framework in Frameworks */ = {isa = PBXBuildFile; fileRef = 2EF6017A308E897800906C11 /* WidgetKit.framework */; };
+		2EF6017D308E897800906C11 /* SwiftUI.framework in Frameworks */ = {isa = PBXBuildFile; fileRef = 2EF6017C308E897800906C11 /* SwiftUI.framework */; };
+		2EF60188308E897B00906C11 /* OrbitDeckWidgetsExtension.appex in Embed Foundation Extensions */ = {isa = PBXBuildFile; fileRef = 2EF60178308E897800906C11 /* OrbitDeckWidgetsExtension.appex */; settings = {ATTRIBUTES = (RemoveHeadersOnCopy, ); }; };
 		64DDAC67D6894708F4CDE021 /* Views/PassesView.swift in Sources */ = {isa = PBXBuildFile; fileRef = A8FF6BE81A9340A8D932821F /* Views/PassesView.swift */; };
 		66289466ED75BEC0DCF9ABC8 /* Views/SettingsView.swift in Sources */ = {isa = PBXBuildFile; fileRef = CC1D031980CF45765481210B /* Views/SettingsView.swift */; };
 		6E7F478781FCC9B1E67B0963 /* Views/RootView.swift in Sources */ = {isa = PBXBuildFile; fileRef = B00C31F510B2C4F86D159714 /* Views/RootView.swift */; };
@@ -101,7 +104,28 @@
 			remoteGlobalIDString = 0E8A3AD980EC179856012B7E;
 			remoteInfo = OrbitDeckIOS;
 		};
+		2EF60186308E897B00906C11 /* PBXContainerItemProxy */ = {
+			isa = PBXContainerItemProxy;
+			containerPortal = 98F54143AB4E86B28C3AFEE0 /* Project object */;
+			proxyType = 1;
+			remoteGlobalIDString = 2EF60177308E897800906C11;
+			remoteInfo = OrbitDeckWidgetsExtension;
+		};
 /* End PBXContainerItemProxy section */
+
+/* Begin PBXCopyFilesBuildPhase section */
+		2EF60189308E897B00906C11 /* Embed Foundation Extensions */ = {
+			isa = PBXCopyFilesBuildPhase;
+			buildActionMask = 2147483647;
+			dstPath = "";
+			dstSubfolderSpec = 13;
+			files = (
+				2EF60188308E897B00906C11 /* OrbitDeckWidgetsExtension.appex in Embed Foundation Extensions */,
+			);
+			name = "Embed Foundation Extensions";
+			runOnlyForDeploymentPostprocessing = 0;
+		};
+/* End PBXCopyFilesBuildPhase section */
 
 /* Begin PBXFileReference section */
 		0377C74A272ACB831917414F /* Engine/OrbitPredictor.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = Engine/OrbitPredictor.swift; sourceTree = "<group>"; };
@@ -169,6 +193,9 @@
 		2E75B92D303228E000338037 /* PrivacyInfo.xcprivacy */ = {isa = PBXFileReference; lastKnownFileType = text.xml; path = PrivacyInfo.xcprivacy; sourceTree = "<group>"; };
 		2E75B92F3037404300338037 /* Info.plist */ = {isa = PBXFileReference; lastKnownFileType = text.plist; path = Info.plist; sourceTree = "<group>"; };
 		2E946B4030308C7600960A39 /* Assets.xcassets */ = {isa = PBXFileReference; lastKnownFileType = folder.assetcatalog; path = Assets.xcassets; sourceTree = "<group>"; };
+		2EF60178308E897800906C11 /* OrbitDeckWidgetsExtension.appex */ = {isa = PBXFileReference; explicitFileType = "wrapper.app-extension"; includeInIndex = 0; path = OrbitDeckWidgetsExtension.appex; sourceTree = BUILT_PRODUCTS_DIR; };
+		2EF6017A308E897800906C11 /* WidgetKit.framework */ = {isa = PBXFileReference; lastKnownFileType = wrapper.framework; name = WidgetKit.framework; path = /System/Library/Frameworks/WidgetKit.framework; sourceTree = "<absolute>"; };
+		2EF6017C308E897800906C11 /* SwiftUI.framework */ = {isa = PBXFileReference; lastKnownFileType = wrapper.framework; name = SwiftUI.framework; path = /System/Library/Frameworks/SwiftUI.framework; sourceTree = "<absolute>"; };
 		2FDDA8C92EE5F5541001A77A /* Services/TransponderService.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = Services/TransponderService.swift; sourceTree = "<group>"; };
 		32CC53E0E4F549F7E5A4BF44 /* Services/LocationProvider.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = Services/LocationProvider.swift; sourceTree = "<group>"; };
 		3601E96659AC708B443708AC /* Views/IlluminationView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = Views/IlluminationView.swift; sourceTree = "<group>"; };
@@ -205,8 +232,19 @@
 		FEA7E0020000000000000001 /* Views/FeatureViews.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = Views/FeatureViews.swift; sourceTree = "<group>"; };
 /* End PBXFileReference section */
 
+/* Begin PBXFileSystemSynchronizedBuildFileExceptionSet section */
+		2EF6018C308E897B00906C11 /* PBXFileSystemSynchronizedBuildFileExceptionSet */ = {
+			isa = PBXFileSystemSynchronizedBuildFileExceptionSet;
+			membershipExceptions = (
+				Info.plist,
+			);
+			target = 2EF60177308E897800906C11 /* OrbitDeckWidgetsExtension */;
+		};
+/* End PBXFileSystemSynchronizedBuildFileExceptionSet section */
+
 /* Begin PBXFileSystemSynchronizedRootGroup section */
 		2E1437C9303DC53F0001B31F /* OrbitDeckIOSTests */ = {isa = PBXFileSystemSynchronizedRootGroup; explicitFileTypes = {}; explicitFolders = (); path = OrbitDeckIOSTests; sourceTree = "<group>"; };
+		2EF6017E308E897800906C11 /* OrbitDeckWidgets */ = {isa = PBXFileSystemSynchronizedRootGroup; exceptions = (2EF6018C308E897B00906C11 /* PBXFileSystemSynchronizedBuildFileExceptionSet */, ); explicitFileTypes = {}; explicitFolders = (); path = OrbitDeckWidgets; sourceTree = "<group>"; };
 /* End PBXFileSystemSynchronizedRootGroup section */
 
 /* Begin PBXFrameworksBuildPhase section */
@@ -214,6 +252,15 @@
 			isa = PBXFrameworksBuildPhase;
 			buildActionMask = 2147483647;
 			files = (
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+		};
+		2EF60175308E897800906C11 /* Frameworks */ = {
+			isa = PBXFrameworksBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+				2EF6017D308E897800906C11 /* SwiftUI.framework in Frameworks */,
+				2EF6017B308E897800906C11 /* WidgetKit.framework in Frameworks */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};
@@ -372,11 +419,21 @@
 			path = ft8_lib;
 			sourceTree = "<group>";
 		};
+		2EF60179308E897800906C11 /* Frameworks */ = {
+			isa = PBXGroup;
+			children = (
+				2EF6017A308E897800906C11 /* WidgetKit.framework */,
+				2EF6017C308E897800906C11 /* SwiftUI.framework */,
+			);
+			name = Frameworks;
+			sourceTree = "<group>";
+		};
 		615B463D1028E4E24B674CF7 /* Products */ = {
 			isa = PBXGroup;
 			children = (
 				1CC9831C1A440AF25860B564 /* OrbitDeck.app */,
 				2E1437C8303DC53F0001B31F /* OrbitDeckIOSTests.xctest */,
+				2EF60178308E897800906C11 /* OrbitDeckWidgetsExtension.appex */,
 			);
 			name = Products;
 			sourceTree = "<group>";
@@ -442,6 +499,8 @@
 				2E946B4030308C7600960A39 /* Assets.xcassets */,
 				8309DD304D804F9D7F6302F5 /* OrbitDeckIOS */,
 				2E1437C9303DC53F0001B31F /* OrbitDeckIOSTests */,
+				2EF6017E308E897800906C11 /* OrbitDeckWidgets */,
+				2EF60179308E897800906C11 /* Frameworks */,
 				615B463D1028E4E24B674CF7 /* Products */,
 			);
 			sourceTree = "<group>";
@@ -456,10 +515,12 @@
 				F612CD2E22E187AC48B5913C /* Sources */,
 				69680EDE0CF9B24DB8DBFE04 /* Frameworks */,
 				86F6FE2DD6E869C1842A14B3 /* Resources */,
+				2EF60189308E897B00906C11 /* Embed Foundation Extensions */,
 			);
 			buildRules = (
 			);
 			dependencies = (
+				2EF60187308E897B00906C11 /* PBXTargetDependency */,
 			);
 			name = OrbitDeckIOS;
 			packageProductDependencies = (
@@ -492,6 +553,28 @@
 			productReference = 2E1437C8303DC53F0001B31F /* OrbitDeckIOSTests.xctest */;
 			productType = "com.apple.product-type.bundle.unit-test";
 		};
+		2EF60177308E897800906C11 /* OrbitDeckWidgetsExtension */ = {
+			isa = PBXNativeTarget;
+			buildConfigurationList = 2EF6018D308E897B00906C11 /* Build configuration list for PBXNativeTarget "OrbitDeckWidgetsExtension" */;
+			buildPhases = (
+				2EF60174308E897800906C11 /* Sources */,
+				2EF60175308E897800906C11 /* Frameworks */,
+				2EF60176308E897800906C11 /* Resources */,
+			);
+			buildRules = (
+			);
+			dependencies = (
+			);
+			fileSystemSynchronizedGroups = (
+				2EF6017E308E897800906C11 /* OrbitDeckWidgets */,
+			);
+			name = OrbitDeckWidgetsExtension;
+			packageProductDependencies = (
+			);
+			productName = OrbitDeckWidgetsExtension;
+			productReference = 2EF60178308E897800906C11 /* OrbitDeckWidgetsExtension.appex */;
+			productType = "com.apple.product-type.app-extension";
+		};
 /* End PBXNativeTarget section */
 
 /* Begin PBXProject section */
@@ -499,7 +582,7 @@
 			isa = PBXProject;
 			attributes = {
 				BuildIndependentTargetsInParallel = 1;
-				LastSwiftUpdateCheck = 2660;
+				LastSwiftUpdateCheck = 2710;
 				LastUpgradeCheck = 1600;
 				TargetAttributes = {
 					0E8A3AD980EC179856012B7E = {
@@ -508,6 +591,9 @@
 					2E1437C7303DC53F0001B31F = {
 						CreatedOnToolsVersion = 26.6;
 						TestTargetID = 0E8A3AD980EC179856012B7E;
+					};
+					2EF60177308E897800906C11 = {
+						CreatedOnToolsVersion = 27.1;
 					};
 				};
 			};
@@ -529,12 +615,20 @@
 			targets = (
 				0E8A3AD980EC179856012B7E /* OrbitDeckIOS */,
 				2E1437C7303DC53F0001B31F /* OrbitDeckIOSTests */,
+				2EF60177308E897800906C11 /* OrbitDeckWidgetsExtension */,
 			);
 		};
 /* End PBXProject section */
 
 /* Begin PBXResourcesBuildPhase section */
 		2E1437C6303DC53F0001B31F /* Resources */ = {
+			isa = PBXResourcesBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+		};
+		2EF60176308E897800906C11 /* Resources */ = {
 			isa = PBXResourcesBuildPhase;
 			buildActionMask = 2147483647;
 			files = (
@@ -555,6 +649,13 @@
 
 /* Begin PBXSourcesBuildPhase section */
 		2E1437C4303DC53F0001B31F /* Sources */ = {
+			isa = PBXSourcesBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+		};
+		2EF60174308E897800906C11 /* Sources */ = {
 			isa = PBXSourcesBuildPhase;
 			buildActionMask = 2147483647;
 			files = (
@@ -655,6 +756,11 @@
 			isa = PBXTargetDependency;
 			target = 0E8A3AD980EC179856012B7E /* OrbitDeckIOS */;
 			targetProxy = 2E1437CC303DC53F0001B31F /* PBXContainerItemProxy */;
+		};
+		2EF60187308E897B00906C11 /* PBXTargetDependency */ = {
+			isa = PBXTargetDependency;
+			target = 2EF60177308E897800906C11 /* OrbitDeckWidgetsExtension */;
+			targetProxy = 2EF60186308E897B00906C11 /* PBXContainerItemProxy */;
 		};
 /* End PBXTargetDependency section */
 
@@ -787,6 +893,172 @@
 			};
 			name = Release;
 		};
+		2EF6018A308E897B00906C11 /* Debug */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				ASSETCATALOG_COMPILER_GENERATE_SWIFT_ASSET_SYMBOL_EXTENSIONS = YES;
+				ASSETCATALOG_COMPILER_GLOBAL_ACCENT_COLOR_NAME = AccentColor;
+				ASSETCATALOG_COMPILER_WIDGET_BACKGROUND_COLOR_NAME = WidgetBackground;
+				CLANG_ANALYZER_NONNULL = YES;
+				CLANG_ANALYZER_NUMBER_OBJECT_CONVERSION = YES_AGGRESSIVE;
+				CLANG_CXX_LANGUAGE_STANDARD = "gnu++20";
+				CLANG_ENABLE_OBJC_WEAK = YES;
+				CLANG_WARN_BLOCK_CAPTURE_AUTORELEASING = YES;
+				CLANG_WARN_BOOL_CONVERSION = YES;
+				CLANG_WARN_COMMA = YES;
+				CLANG_WARN_CONSTANT_CONVERSION = YES;
+				CLANG_WARN_DEPRECATED_OBJC_IMPLEMENTATIONS = YES;
+				CLANG_WARN_DIRECT_OBJC_ISA_USAGE = YES_ERROR;
+				CLANG_WARN_DOCUMENTATION_COMMENTS = YES;
+				CLANG_WARN_EMPTY_BODY = YES;
+				CLANG_WARN_ENUM_CONVERSION = YES;
+				CLANG_WARN_INFINITE_RECURSION = YES;
+				CLANG_WARN_INT_CONVERSION = YES;
+				CLANG_WARN_NON_LITERAL_NULL_CONVERSION = YES;
+				CLANG_WARN_OBJC_IMPLICIT_RETAIN_SELF = YES;
+				CLANG_WARN_OBJC_LITERAL_CONVERSION = YES;
+				CLANG_WARN_OBJC_ROOT_CLASS = YES_ERROR;
+				CLANG_WARN_QUOTED_INCLUDE_IN_FRAMEWORK_HEADER = YES;
+				CLANG_WARN_RANGE_LOOP_ANALYSIS = YES;
+				CLANG_WARN_STRICT_PROTOTYPES = YES;
+				CLANG_WARN_SUSPICIOUS_MOVE = YES;
+				CLANG_WARN_UNGUARDED_AVAILABILITY = YES_AGGRESSIVE;
+				CLANG_WARN_UNREACHABLE_CODE = YES;
+				CLANG_WARN__DUPLICATE_METHOD_MATCH = YES;
+				CODE_SIGN_STYLE = Automatic;
+				CURRENT_PROJECT_VERSION = 1;
+				DEVELOPMENT_TEAM = A4KV683T6U;
+				ENABLE_APP_SANDBOX = YES;
+				ENABLE_STRICT_OBJC_MSGSEND = YES;
+				ENABLE_USER_SCRIPT_SANDBOXING = YES;
+				GCC_DYNAMIC_NO_PIC = NO;
+				GCC_NO_COMMON_BLOCKS = YES;
+				GCC_PREPROCESSOR_DEFINITIONS = (
+					"DEBUG=1",
+					"$(inherited)",
+				);
+				GCC_WARN_64_TO_32_BIT_CONVERSION = YES;
+				GCC_WARN_ABOUT_RETURN_TYPE = YES_ERROR;
+				GCC_WARN_UNDECLARED_SELECTOR = YES;
+				GCC_WARN_UNINITIALIZED_AUTOS = YES_AGGRESSIVE;
+				GCC_WARN_UNUSED_FUNCTION = YES;
+				GCC_WARN_UNUSED_VARIABLE = YES;
+				GENERATE_INFOPLIST_FILE = YES;
+				INFOPLIST_FILE = OrbitDeckWidgets/Info.plist;
+				INFOPLIST_KEY_CFBundleDisplayName = OrbitDeck;
+				INFOPLIST_KEY_NSHumanReadableCopyright = "";
+				IPHONEOS_DEPLOYMENT_TARGET = 17.0;
+				LD_RUNPATH_SEARCH_PATHS = (
+					"$(inherited)",
+					"@executable_path/Frameworks",
+					"@executable_path/../../Frameworks",
+				);
+				"LD_RUNPATH_SEARCH_PATHS[sdk=macosx*]" = (
+					"$(inherited)",
+					"@executable_path/../Frameworks",
+					"@executable_path/../../../../Frameworks",
+				);
+				LOCALIZATION_PREFERS_STRING_CATALOGS = YES;
+				MACOSX_DEPLOYMENT_TARGET = 27.0;
+				MARKETING_VERSION = 1.1;
+				MTL_ENABLE_DEBUG_INFO = INCLUDE_SOURCE;
+				MTL_FAST_MATH = YES;
+				PRODUCT_BUNDLE_IDENTIFIER = com.prstoetzer.OrbitDeckIOS.OrbitDeckWidgets;
+				PRODUCT_NAME = "$(TARGET_NAME)";
+				SDKROOT = auto;
+				SKIP_INSTALL = YES;
+				STRING_CATALOG_GENERATE_SYMBOLS = YES;
+				SUPPORTED_PLATFORMS = "iphoneos iphonesimulator macosx xros xrsimulator";
+				SWIFT_APPROACHABLE_CONCURRENCY = YES;
+				SWIFT_EMIT_LOC_STRINGS = YES;
+				SWIFT_UPCOMING_FEATURE_MEMBER_IMPORT_VISIBILITY = YES;
+				SWIFT_VERSION = 5.0;
+				TARGETED_DEVICE_FAMILY = "1,2";
+				XROS_DEPLOYMENT_TARGET = 27.0;
+			};
+			name = Debug;
+		};
+		2EF6018B308E897B00906C11 /* Release */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				ASSETCATALOG_COMPILER_GENERATE_SWIFT_ASSET_SYMBOL_EXTENSIONS = YES;
+				ASSETCATALOG_COMPILER_GLOBAL_ACCENT_COLOR_NAME = AccentColor;
+				ASSETCATALOG_COMPILER_WIDGET_BACKGROUND_COLOR_NAME = WidgetBackground;
+				CLANG_ANALYZER_NONNULL = YES;
+				CLANG_ANALYZER_NUMBER_OBJECT_CONVERSION = YES_AGGRESSIVE;
+				CLANG_CXX_LANGUAGE_STANDARD = "gnu++20";
+				CLANG_ENABLE_OBJC_WEAK = YES;
+				CLANG_WARN_BLOCK_CAPTURE_AUTORELEASING = YES;
+				CLANG_WARN_BOOL_CONVERSION = YES;
+				CLANG_WARN_COMMA = YES;
+				CLANG_WARN_CONSTANT_CONVERSION = YES;
+				CLANG_WARN_DEPRECATED_OBJC_IMPLEMENTATIONS = YES;
+				CLANG_WARN_DIRECT_OBJC_ISA_USAGE = YES_ERROR;
+				CLANG_WARN_DOCUMENTATION_COMMENTS = YES;
+				CLANG_WARN_EMPTY_BODY = YES;
+				CLANG_WARN_ENUM_CONVERSION = YES;
+				CLANG_WARN_INFINITE_RECURSION = YES;
+				CLANG_WARN_INT_CONVERSION = YES;
+				CLANG_WARN_NON_LITERAL_NULL_CONVERSION = YES;
+				CLANG_WARN_OBJC_IMPLICIT_RETAIN_SELF = YES;
+				CLANG_WARN_OBJC_LITERAL_CONVERSION = YES;
+				CLANG_WARN_OBJC_ROOT_CLASS = YES_ERROR;
+				CLANG_WARN_QUOTED_INCLUDE_IN_FRAMEWORK_HEADER = YES;
+				CLANG_WARN_RANGE_LOOP_ANALYSIS = YES;
+				CLANG_WARN_STRICT_PROTOTYPES = YES;
+				CLANG_WARN_SUSPICIOUS_MOVE = YES;
+				CLANG_WARN_UNGUARDED_AVAILABILITY = YES_AGGRESSIVE;
+				CLANG_WARN_UNREACHABLE_CODE = YES;
+				CLANG_WARN__DUPLICATE_METHOD_MATCH = YES;
+				CODE_SIGN_STYLE = Automatic;
+				CURRENT_PROJECT_VERSION = 1;
+				DEVELOPMENT_TEAM = A4KV683T6U;
+				ENABLE_APP_SANDBOX = YES;
+				ENABLE_NS_ASSERTIONS = NO;
+				ENABLE_STRICT_OBJC_MSGSEND = YES;
+				ENABLE_USER_SCRIPT_SANDBOXING = YES;
+				GCC_NO_COMMON_BLOCKS = YES;
+				GCC_WARN_64_TO_32_BIT_CONVERSION = YES;
+				GCC_WARN_ABOUT_RETURN_TYPE = YES_ERROR;
+				GCC_WARN_UNDECLARED_SELECTOR = YES;
+				GCC_WARN_UNINITIALIZED_AUTOS = YES_AGGRESSIVE;
+				GCC_WARN_UNUSED_FUNCTION = YES;
+				GCC_WARN_UNUSED_VARIABLE = YES;
+				GENERATE_INFOPLIST_FILE = YES;
+				INFOPLIST_FILE = OrbitDeckWidgets/Info.plist;
+				INFOPLIST_KEY_CFBundleDisplayName = OrbitDeck;
+				INFOPLIST_KEY_NSHumanReadableCopyright = "";
+				IPHONEOS_DEPLOYMENT_TARGET = 17.0;
+				LD_RUNPATH_SEARCH_PATHS = (
+					"$(inherited)",
+					"@executable_path/Frameworks",
+					"@executable_path/../../Frameworks",
+				);
+				"LD_RUNPATH_SEARCH_PATHS[sdk=macosx*]" = (
+					"$(inherited)",
+					"@executable_path/../Frameworks",
+					"@executable_path/../../../../Frameworks",
+				);
+				LOCALIZATION_PREFERS_STRING_CATALOGS = YES;
+				MACOSX_DEPLOYMENT_TARGET = 27.0;
+				MARKETING_VERSION = 1.1;
+				MTL_ENABLE_DEBUG_INFO = NO;
+				MTL_FAST_MATH = YES;
+				PRODUCT_BUNDLE_IDENTIFIER = com.prstoetzer.OrbitDeckIOS.OrbitDeckWidgets;
+				PRODUCT_NAME = "$(TARGET_NAME)";
+				SDKROOT = auto;
+				SKIP_INSTALL = YES;
+				STRING_CATALOG_GENERATE_SYMBOLS = YES;
+				SUPPORTED_PLATFORMS = "iphoneos iphonesimulator macosx xros xrsimulator";
+				SWIFT_APPROACHABLE_CONCURRENCY = YES;
+				SWIFT_EMIT_LOC_STRINGS = YES;
+				SWIFT_UPCOMING_FEATURE_MEMBER_IMPORT_VISIBILITY = YES;
+				SWIFT_VERSION = 5.0;
+				TARGETED_DEVICE_FAMILY = "1,2";
+				XROS_DEPLOYMENT_TARGET = 27.0;
+			};
+			name = Release;
+		};
 		504B6810B36BF9ADE0C509C4 /* Release */ = {
 			isa = XCBuildConfiguration;
 			buildSettings = {
@@ -838,8 +1110,13 @@
 				INFOPLIST_KEY_CFBundleDisplayName = OrbitDeck;
 				INFOPLIST_KEY_ITSAppUsesNonExemptEncryption = NO;
 				INFOPLIST_KEY_LSApplicationCategoryType = "public.app-category.utilities";
+				INFOPLIST_KEY_NSBluetoothAlwaysUsageDescription = "OrbitDeck connects to a Bluetooth Low Energy serial adapter to Doppler-tune your radio (CAT control). It is used only when you configure and connect a radio.";
 				INFOPLIST_KEY_NSCalendarsWriteOnlyAccessUsageDescription = "OrbitDeck adds satellite pass times to your calendar when you choose to.";
+				INFOPLIST_KEY_NSLocalNetworkUsageDescription = "OrbitDeck connects to your radio, rotator, or a rigctld/rotctld server over your local Wi-Fi network to control it. It is used only when you configure and connect a network device.";
 				INFOPLIST_KEY_NSLocationWhenInUseUsageDescription = "OrbitDeck uses your location as the observer station for satellite pass predictions.";
+				INFOPLIST_KEY_NSMicrophoneUsageDescription = "OrbitDeck captures the received satellite audio from a connected USB audio interface (which iOS treats as a microphone) to record passes and decode SSTV and FT4. Audio is used only while you record or decode.";
+				INFOPLIST_KEY_NSPhotoLibraryAddUsageDescription = "OrbitDeck can save decoded SSTV images to your photo library when you choose to export them.";
+				INFOPLIST_KEY_NSSupportsLiveActivities = YES;
 				INFOPLIST_KEY_UIApplicationSceneManifest_Generation = YES;
 				INFOPLIST_KEY_UIApplicationSupportsIndirectInputEvents = YES;
 				INFOPLIST_KEY_UILaunchScreen_Generation = YES;
@@ -873,8 +1150,13 @@
 				INFOPLIST_KEY_CFBundleDisplayName = OrbitDeck;
 				INFOPLIST_KEY_ITSAppUsesNonExemptEncryption = NO;
 				INFOPLIST_KEY_LSApplicationCategoryType = "public.app-category.utilities";
+				INFOPLIST_KEY_NSBluetoothAlwaysUsageDescription = "OrbitDeck connects to a Bluetooth Low Energy serial adapter to Doppler-tune your radio (CAT control). It is used only when you configure and connect a radio.";
 				INFOPLIST_KEY_NSCalendarsWriteOnlyAccessUsageDescription = "OrbitDeck adds satellite pass times to your calendar when you choose to.";
+				INFOPLIST_KEY_NSLocalNetworkUsageDescription = "OrbitDeck connects to your radio, rotator, or a rigctld/rotctld server over your local Wi-Fi network to control it. It is used only when you configure and connect a network device.";
 				INFOPLIST_KEY_NSLocationWhenInUseUsageDescription = "OrbitDeck uses your location as the observer station for satellite pass predictions.";
+				INFOPLIST_KEY_NSMicrophoneUsageDescription = "OrbitDeck captures the received satellite audio from a connected USB audio interface (which iOS treats as a microphone) to record passes and decode SSTV and FT4. Audio is used only while you record or decode.";
+				INFOPLIST_KEY_NSPhotoLibraryAddUsageDescription = "OrbitDeck can save decoded SSTV images to your photo library when you choose to export them.";
+				INFOPLIST_KEY_NSSupportsLiveActivities = YES;
 				INFOPLIST_KEY_UIApplicationSceneManifest_Generation = YES;
 				INFOPLIST_KEY_UIApplicationSupportsIndirectInputEvents = YES;
 				INFOPLIST_KEY_UILaunchScreen_Generation = YES;
@@ -911,6 +1193,15 @@
 			buildConfigurations = (
 				2E1437CF303DC53F0001B31F /* Debug */,
 				2E1437D0303DC53F0001B31F /* Release */,
+			);
+			defaultConfigurationIsVisible = 0;
+			defaultConfigurationName = Release;
+		};
+		2EF6018D308E897B00906C11 /* Build configuration list for PBXNativeTarget "OrbitDeckWidgetsExtension" */ = {
+			isa = XCConfigurationList;
+			buildConfigurations = (
+				2EF6018A308E897B00906C11 /* Debug */,
+				2EF6018B308E897B00906C11 /* Release */,
 			);
 			defaultConfigurationIsVisible = 0;
 			defaultConfigurationName = Release;

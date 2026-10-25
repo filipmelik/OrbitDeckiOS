@@ -299,7 +299,7 @@ final class AudioSubscription: AudioSource, @unchecked Sendable {
 // ===========================================================================
 //  PhoneAudioBridge — the phone's own mic + speaker for remote voice
 //
-//  A local AVAudioEngine (voice-chat mode, echo-cancelled) that plays the radio's
+//  A local AVAudioEngine (voice-chat mode, echo-canceled) that plays the radio's
 //  received audio to the phone speaker/headset and captures the phone mic for
 //  transmit. It bridges the network radio audio (via an AudioHub subscription) to
 //  the operator: RX PCM in → speaker; mic in → RX-rate mono for TX. Ring-buffered so

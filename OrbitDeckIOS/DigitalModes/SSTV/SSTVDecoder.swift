@@ -350,7 +350,7 @@ final class SSTVDecoder: ObservableObject {
             // the first line starts at the detected image start.
             let nominal = (currentLine == 0) ? Double(imageStart) : lastLineStart + lineSamples
             // Search window: wide on the first line (VIS timing is coarse), narrower
-            // afterwards. Scale with line length — a long mode (PD) drifts more per
+            // afterward. Scale with line length — a long mode (PD) drifts more per
             // line than a short one (Robot), so a fixed window loses lock on PD.
             let searchW = (currentLine == 0) ? max(0.030 * effRate, lineSamples * 0.04)
                                              : max(0.006 * effRate, lineSamples * 0.02)

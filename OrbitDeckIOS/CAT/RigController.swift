@@ -195,7 +195,7 @@ final class RigController: ObservableObject {
         // Build the link list. Slot 0 is the primary radio; slot 1 (dual) is uplink.
         var built: [LiveLink] = []
         // A receive-only radio (CI-V receivers, RX-only handhelds) can only ever be a
-        // downlink: never honour a config that assigns it the uplink/both leg, so no TX
+        // downlink: never honor a config that assigns it the uplink/both leg, so no TX
         // frequency/mode/PTT frame is sent to a radio that must not transmit.
         // Single-radio split VFO: one radio, both legs, on VFO A/B (rigctld has its own
         // split option and is excluded here).
@@ -462,7 +462,7 @@ final class RigController: ObservableObject {
             }
             // Satellite mode. The IC-9100/9700 (canAssignBand) REQUIRE satellite mode for
             // full-duplex MAIN/SUB tuning to take effect, so command it automatically for
-            // those; other CI-V rigs honour the user's "Command satellite mode" toggle.
+            // those; other CI-V rigs honor the user's "Command satellite mode" toggle.
             if link.spec.family == .civ, link.spec.fullDuplex,
                (config.tuning.satMode || link.spec.canAssignBand),
                let f = CATCodec.civSatMode(link.spec, addr: addr, on: true) {
@@ -1070,7 +1070,7 @@ final class RigController: ObservableObject {
             if leg == .uplink { await sendRaw(link, CATCodec.ft100SelectVFO(b: false)) }
         case .kenwoodBase:
             // MD has no VFO field: make B active for the uplink mode, then go back to A.
-            // FR (and possibly FN) can cancel split, so re-assert it afterwards (Hamlib
+            // FR (and possibly FN) can cancel split, so re-assert it afterward (Hamlib
             // always appends FT1 after FR for this reason).
             let frft = link.spec.kenwoodSplitFRFT
             if leg == .uplink { await sendRaw(link, CATCodec.kwActiveVFO(b: true, frft: frft)) }

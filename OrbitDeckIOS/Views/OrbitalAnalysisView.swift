@@ -69,8 +69,8 @@ struct OrbitalAnalysisView: View {
                     MetricRow("Range rate", ODFormat.velocity(look.rangeRateKmS))
                     MetricRow("Sub-satellite latitude", String(format: "%+.4f°", look.subLatitude))
                     MetricRow("Sub-satellite longitude", String(format: "%+.4f°", look.subLongitude))
-                    MetricRow("Altitude", String(format: "%.1f km", look.altitudeKm))
-                    MetricRow("Footprint diameter", String(format: "%.0f km", look.footprintRadiusKm * 2))
+                    MetricRow("Altitude", ODFormat.units(String(format: "%.1f km", look.altitudeKm)))
+                    MetricRow("Footprint diameter", ODFormat.units(String(format: "%.0f km", look.footprintRadiusKm * 2)))
                     MetricRow("Beta angle", String(format: "%+.2f°", look.betaAngleDeg))
                     MetricRow("Illumination", look.sunlit ? "Sunlit" : "Eclipsed", valueColor: look.sunlit ? ODTheme.warning : ODTheme.muted)
                     let eclFrac = LearnMath.eclipseFraction(altitudeKm: look.altitudeKm, betaDeg: look.betaAngleDeg)
@@ -99,9 +99,9 @@ struct OrbitalAnalysisView: View {
                 MetricRow("Period", String(format: "%.3f min", satellite.periodMinutes))
             }
             SectionCard("Derived orbit") {
-                MetricRow("Semi-major axis", String(format: "%.1f km", satellite.semiMajorAxisKm))
-                MetricRow("Perigee", String(format: "%.1f km", satellite.perigeeKm))
-                MetricRow("Apogee", String(format: "%.1f km", satellite.apogeeKm))
+                MetricRow("Semi-major axis", ODFormat.units(String(format: "%.1f km", satellite.semiMajorAxisKm)))
+                MetricRow("Perigee", ODFormat.units(String(format: "%.1f km", satellite.perigeeKm)))
+                MetricRow("Apogee", ODFormat.units(String(format: "%.1f km", satellite.apogeeKm)))
                 MetricRow("J2 node regression", String(format: "%+.4f°/day", j2.nodeDegDay))
                 MetricRow("J2 perigee precession", String(format: "%+.4f°/day", j2.perigeeDegDay))
                 MetricRow("B* drag term", String(format: "%.4e (1/R⊕)", satellite.bstar))

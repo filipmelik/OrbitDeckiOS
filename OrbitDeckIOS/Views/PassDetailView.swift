@@ -65,7 +65,7 @@ struct PassDetailView: View {
                                 MetricRow("Range", ODFormat.distance(tcaLook.rangeKm))
                                 MetricRow("Range rate", ODFormat.velocity(tcaLook.rangeRateKmS))
                                 MetricRow("Subpoint", String(format: "%.3f°, %.3f°", tcaLook.subLatitude, tcaLook.subLongitude))
-                                MetricRow("Altitude", String(format: "%.1f km", tcaLook.altitudeKm))
+                                MetricRow("Altitude", ODFormat.units(String(format: "%.1f km", tcaLook.altitudeKm)))
                                 MetricRow("Illumination", tcaLook.sunlit ? "Sunlit" : "Eclipsed", valueColor: tcaLook.sunlit ? ODTheme.warning : ODTheme.muted)
                             }
                         }

@@ -567,11 +567,15 @@ struct HomePacketCard: View {
     @EnvironmentObject private var packet: PacketEngine
     @EnvironmentObject private var audio: AudioHub
     @EnvironmentObject private var rig: RigController
+    @EnvironmentObject private var store: OrbitStore
     @AppStorage(FeatureVisibility.packetKey) private var visibility = FeatureVisibility.auto
     @State private var showSetup = false
     @State private var pickingAdapter = false
-    @State private var messageTo = ""
+    @State private var messageTo = "CQ"
     @State private var messageText = ""
+    @State private var tab = 0
+    @State private var onlyMine = false
+    @State private var horizonEvent: NextEvent?
     let satellite: SatelliteRecord
 
     /// Auto: show when this satellite has a packet transponder and there's a way to
@@ -592,6 +596,10 @@ struct HomePacketCard: View {
         }
     }
 
+    private var profile: Binding<PacketSatelliteProfile> {
+        Binding(get: { packet.profile(for: satellite.id) }, set: { packet.setProfile($0, for: satellite.id) })
+    }
+
     var body: some View {
         if visible {
             SectionCard("Packet / APRS") {
@@ -609,6 +617,7 @@ struct HomePacketCard: View {
                     .buttonStyle(.bordered)
                 }
                 infoLine
+                profileRow
 
                 if packet.isRunning {
                     if packet.settings.transport == .builtInModem {
@@ -616,14 +625,30 @@ struct HomePacketCard: View {
                             get: { packet.settings.inputGain },
                             set: { packet.settings.inputGain = $0 }), level: packet.rxLevel)
                     }
-                    monitor
+                    statsLine
+                    quickMessages
                     compose
+                    Picker("View", selection: $tab) {
+                        Text("Monitor").tag(0)
+                        Text("Stations (\(packet.heard.count))").tag(1)
+                    }
+                    .pickerStyle(.segmented)
+                    if tab == 0 { monitor } else { stations }
                 }
 
                 DisclosureGroup("Setup", isExpanded: $showSetup) { setup.padding(.top, 4) }
                     .font(.subheadline).tint(ODTheme.accent)
             }
-            .task(id: satellite.id) { await packet.tuneBBLink(for: satellite) }
+            .task(id: satellite.id) {
+                await packet.tuneBBLink(for: satellite)
+            }
+            // AOS/LOS for the horizon line, refreshed each minute.
+            .task(id: "\(satellite.id)-\(Int(Date().timeIntervalSince1970 / 60))") {
+                let sat = satellite, observer = store.preferences.observer
+                horizonEvent = await Task.detached(priority: .utility) {
+                    try? OrbitPredictor.nextEvent(sat, observer: observer, horizonDays: 2)
+                }.value
+            }
             .sheet(isPresented: $pickingAdapter) {
                 NavigationStack {
                     BLEPickerView(selectedID: packet.settings.bleIdentifier) { dev in
@@ -639,14 +664,26 @@ struct HomePacketCard: View {
 
     private var infoLine: some View {
         let tp = packet.packetTransponder(for: satellite)
-        let duplex = rig.isSplitVFO || (tp.map { $0.uplinkCenter > 0 && abs($0.uplinkCenter - $0.downlinkCenter) < 10_000_000 } ?? true)
         var parts: [String] = []
         if let me = packet.myAddress { parts.append(me.description) }
-        parts.append("via \(packet.settings.path.isEmpty ? "direct" : packet.settings.path)")
         if let tp { parts.append(ODFormat.frequency(tp.downlinkCenter)) }
-        parts.append(duplex ? "half duplex" : "full duplex")
+        parts.append(packet.isFullDuplex(for: satellite) ? "full duplex" : "half duplex")
         return VStack(alignment: .leading, spacing: 2) {
             Text(parts.joined(separator: " · ")).font(.caption.monospacedDigit()).foregroundStyle(ODTheme.muted)
+            TimelineView(.periodic(from: .now, by: 10)) { context in
+                if let ev = horizonEvent {
+                    let mins = max(0, Int(ev.date.timeIntervalSince(context.date) / 60))
+                    if ev.isVisible {
+                        Label("\(satellite.name) is up · LOS in \(mins) min", systemImage: "dot.radiowaves.up.forward")
+                            .font(.caption).foregroundStyle(ODTheme.good)
+                    } else {
+                        Label("Below the horizon · AOS \(ODFormat.primaryClock(ev.date)) (in \(mins) min)"
+                              + (packet.settings.blockBelowHorizon ? " — sending is blocked until then" : ""),
+                              systemImage: "moon.zzz")
+                            .font(.caption).foregroundStyle(ODTheme.warning)
+                    }
+                }
+            }
             HStack(spacing: 8) {
                 if packet.channelBusy { Label("Channel busy", systemImage: "dot.radiowaves.left.and.right").foregroundStyle(ODTheme.warning) }
                 if packet.heardSelfViaSatellite { Label("Heard yourself via the satellite", systemImage: "checkmark.seal.fill").foregroundStyle(ODTheme.good) }
@@ -655,49 +692,161 @@ struct HomePacketCard: View {
         }
     }
 
+    /// Per-satellite format and path (ISS: APRS via ARISS).
+    private var profileRow: some View {
+        VStack(alignment: .leading, spacing: 6) {
+            Picker("Format", selection: profile.format) {
+                ForEach(PacketMessageFormat.allCases) { Text($0.label).tag($0) }
+            }
+            .pickerStyle(.segmented)
+            HStack {
+                Text("Path").font(.caption).foregroundStyle(ODTheme.muted)
+                TextField("ARISS", text: profile.path)
+                    .textInputAutocapitalization(.characters).autocorrectionDisabled()
+                    .textFieldStyle(.odField)
+                Menu("Presets") {
+                    ForEach(["ARISS", "APRSAT", "WIDE2-1", "ARISS,WIDE2-1", ""], id: \.self) { p in
+                        Button(p.isEmpty ? "Direct (no path)" : p) { profile.wrappedValue.path = p }
+                    }
+                }
+                .font(.caption)
+            }
+            Text(profile.wrappedValue.format == .plainText
+                 ? "UISS-style unproto text: the To call is the AX.25 destination (CQ by default) and your text is sent as is — e.g. \(packet.myAddress?.description ?? "N0CALL")>CQ,\(profile.wrappedValue.path.isEmpty ? "…" : profile.wrappedValue.path):CQ \(String(store.operatorGrid6.prefix(4)))."
+                 : "APRS: To CQ (or blank) sends a status; a callsign sends an APRS message\(packet.settings.requestAcks ? " (numbered, for acks)" : "").")
+                .font(.caption2).foregroundStyle(ODTheme.muted)
+        }
+    }
+
+    private var statsLine: some View {
+        let s = packet.stats
+        let pct = s.sent > 0 ? Int((Double(s.digipeated) / Double(s.sent) * 100).rounded()) : 0
+        return Text("Sent \(s.sent) · digipeated \(s.digipeated) (\(pct)%)" + (s.digipeated > 0 ? String(format: " · median delay %.1f s", s.medianDelay) : ""))
+            .font(.caption.monospacedDigit()).foregroundStyle(ODTheme.muted)
+    }
+
+    private var quickMessages: some View {
+        ScrollView(.horizontal, showsIndicators: false) {
+            HStack(spacing: 6) {
+                ForEach(Array(packet.settings.macros.enumerated()), id: \.offset) { _, macro in
+                    Button {
+                        runMacro(macro)
+                    } label: {
+                        Text(macroLabel(macro)).font(.caption).lineLimit(1)
+                    }
+                    .buttonStyle(.bordered)
+                    .disabled(packet.isTransmitting)
+                }
+            }
+        }
+    }
+
+    private func macroLabel(_ macro: String) -> String {
+        if macro == "{POSITION}" { return "Position" }
+        if macro == "{HEARD}" { return "Heard list" }
+        return packet.expand(macro, to: messageTo.isEmpty ? "CALL" : messageTo)
+    }
+
+    private func runMacro(_ macro: String) {
+        if macro.trimmingCharacters(in: .whitespaces) == "{POSITION}" { packet.sendPosition(); return }
+        let text = packet.expand(macro, to: messageTo)
+        // A CQ macro always goes to CQ.
+        let to = PacketText.isCQ(text) ? "CQ" : messageTo
+        packet.sendText(text, to: to)
+    }
+
+    private var compose: some View {
+        HStack {
+            TextField("To", text: $messageTo)
+                .textInputAutocapitalization(.characters).autocorrectionDisabled()
+                .textFieldStyle(.odField).frame(width: 96)
+            TextField("Message", text: $messageText)
+                .textFieldStyle(.odField)
+                .onSubmit(sendMessage)
+            Button("Send", action: sendMessage)
+                .buttonStyle(.borderedProminent)
+                .disabled(messageText.isEmpty || packet.isTransmitting)
+        }
+    }
+
+    private func sendMessage() {
+        packet.sendText(messageText, to: messageTo)
+        messageText = ""
+    }
+
     private var monitor: some View {
         VStack(alignment: .leading, spacing: 6) {
             HStack {
-                Text("Monitor").font(.caption.weight(.semibold)).foregroundStyle(ODTheme.muted)
+                Toggle("Only my traffic", isOn: $onlyMine).font(.caption).toggleStyle(.switch).fixedSize()
                 Spacer()
                 if !packet.log.isEmpty { Button("Clear") { packet.clearLog() }.font(.caption).buttonStyle(.borderless) }
             }
-            if packet.log.isEmpty {
-                Text("No packets yet. Frames heard on the downlink appear here.").font(.caption).foregroundStyle(ODTheme.muted)
+            let entries = packet.log.filter { e in
+                !onlyMine || e.direction == .sent || e.ownDigipeated || e.toMe
+            }
+            if entries.isEmpty {
+                Text(onlyMine ? "Nothing to or from you yet." : "No packets yet. Frames heard on the downlink appear here.")
+                    .font(.caption).foregroundStyle(ODTheme.muted)
             } else {
-                ForEach(packet.log.suffix(25).reversed()) { entry in
+                ForEach(entries.suffix(30).reversed()) { entry in
                     PacketLogRow(entry: entry) { call in messageTo = call }
                 }
             }
         }
     }
 
-    private var compose: some View {
-        VStack(alignment: .leading, spacing: 8) {
+    private var stations: some View {
+        VStack(alignment: .leading, spacing: 6) {
             HStack {
-                TextField("To", text: $messageTo)
-                    .textInputAutocapitalization(.characters).autocorrectionDisabled()
-                    .textFieldStyle(.odField).frame(width: 110)
-                TextField("Message", text: $messageText)
-                    .textFieldStyle(.odField)
-                    .onSubmit(sendMessage)
-                Button("Send", action: sendMessage)
-                    .buttonStyle(.borderedProminent)
-                    .disabled(messageTo.isEmpty || messageText.isEmpty || packet.isTransmitting)
-            }
-            HStack {
-                Button { packet.sendPosition() } label: { Label("Send position", systemImage: "location") }
-                    .buttonStyle(.bordered)
-                    .disabled(packet.isTransmitting)
+                Text("Tap Reply to address a station, Log to add the contact (mode PKT).")
+                    .font(.caption2).foregroundStyle(ODTheme.muted)
                 Spacer()
-                Text("Tap a station to reply.").font(.caption2).foregroundStyle(ODTheme.muted)
+                if !packet.heard.isEmpty { Button("Clear") { packet.clearHeard() }.font(.caption).buttonStyle(.borderless) }
+            }
+            if packet.heard.isEmpty {
+                Text("No stations heard yet.").font(.caption).foregroundStyle(ODTheme.muted)
+            }
+            ForEach(packet.heard) { station in
+                HStack(alignment: .firstTextBaseline, spacing: 8) {
+                    VStack(alignment: .leading, spacing: 1) {
+                        HStack(spacing: 5) {
+                            Text(station.call).font(.subheadline.weight(.semibold))
+                            if station.cqs > 0 { Text("CQ").font(.caption2.weight(.bold)).foregroundStyle(ODTheme.good) }
+                            if station.viaDigipeater { Image(systemName: "dot.radiowaves.up.forward").font(.caption2).foregroundStyle(.cyan) }
+                            if station.logged { Image(systemName: "checkmark.circle.fill").font(.caption2).foregroundStyle(ODTheme.good) }
+                        }
+                        Text(stationDetail(station)).font(.caption2.monospacedDigit()).foregroundStyle(ODTheme.muted)
+                    }
+                    Spacer()
+                    Button("Reply") { messageTo = station.call }.font(.caption).buttonStyle(.bordered)
+                    Button("Log") { packet.logQSO(with: station.call) }.font(.caption).buttonStyle(.bordered)
+                        .disabled(station.logged)
+                }
             }
         }
     }
 
-    private func sendMessage() {
-        packet.sendMessage(to: messageTo, text: messageText)
-        messageText = ""
+    private func stationDetail(_ s: PacketHeardStation) -> String {
+        var parts: [String] = []
+        if let g = s.grid { parts.append(String(g.prefix(6))) }
+        if let lat = s.latitude, let lon = s.longitude {
+            let o = store.preferences.observer
+            let (km, brg) = Self.distanceBearing(o.latitude, o.longitude, lat, lon)
+            parts.append("\(ODFormat.km(km, decimals: 0)) \(ODFormat.compass(brg))")
+        }
+        parts.append("\(s.frames)×")
+        parts.append(ODFormat.axisClock(s.lastHeard))
+        return parts.joined(separator: " · ")
+    }
+
+    static func distanceBearing(_ lat1: Double, _ lon1: Double, _ lat2: Double, _ lon2: Double) -> (Double, Double) {
+        let r = Double.pi / 180
+        let p1 = lat1 * r, p2 = lat2 * r, dl = (lon2 - lon1) * r
+        let a = sin((p2 - p1) / 2) * sin((p2 - p1) / 2) + cos(p1) * cos(p2) * sin(dl / 2) * sin(dl / 2)
+        let km = 6371.0 * 2 * atan2(a.squareRoot(), (1 - a).squareRoot())
+        let y = sin(dl) * cos(p2), x = cos(p1) * sin(p2) - sin(p1) * cos(p2) * cos(dl)
+        let brg = (atan2(y, x) / r + 360).truncatingRemainder(dividingBy: 360)
+        return (km, brg)
     }
 
     @ViewBuilder private var setup: some View {
@@ -732,26 +881,69 @@ struct HomePacketCard: View {
                     }
                     FineSlider(value: $packet.settings.outputLevel, range: 0.05...1, step: 0.05)
                 }
-                Text("1200-baud AFSK through your audio interface. OrbitDeck keys the radio over CAT when it can, otherwise use VOX. Set about 3 kHz deviation: start low and raise the level until the digipeated copy decodes. With CAT connected, split-VFO Doppler keeps the uplink on frequency and holds it steady while keyed.")
+                Button { packet.sendTestTone() } label: { Label("Send 3 s test tone", systemImage: "waveform") }
+                    .buttonStyle(.bordered)
+                    .disabled(!packet.isRunning || packet.isTransmitting)
+                Toggle("Off-frequency decoders (±175/±350 Hz)", isOn: $packet.settings.offsetDecoders)
+                    .disabled(packet.isRunning)
+                Text("1200-baud AFSK through your audio interface. OrbitDeck keys the radio over CAT when it can, otherwise use VOX. Set about 3 kHz deviation: send the test tone into a dummy load, start low and raise the level until the digipeated copy decodes. Off-frequency decoders catch stations slightly off frequency (residual Doppler).")
                     .font(.caption).foregroundStyle(ODTheme.muted)
             }
-            Stepper("SSID: -\(packet.settings.ssid)", value: $packet.settings.ssid, in: 0...15)
-            HStack {
-                Text("Path")
-                Spacer()
-                TextField("ARISS", text: $packet.settings.path)
-                    .textInputAutocapitalization(.characters).autocorrectionDisabled()
-                    .multilineTextAlignment(.trailing).textFieldStyle(.odField).frame(width: 160)
+            Group {
+                Stepper("SSID: -\(packet.settings.ssid)", value: $packet.settings.ssid, in: 0...15)
+                Picker("Position precision", selection: $packet.settings.positionPrecision) {
+                    ForEach(PacketPositionPrecision.allCases) { Text($0.label).tag($0) }
+                }
+                HStack {
+                    Text("Position comment")
+                    Spacer()
+                    TextField("{MYGRID4} via OrbitDeck", text: $packet.settings.beaconComment)
+                        .multilineTextAlignment(.trailing).textFieldStyle(.odField).frame(width: 190)
+                }
+                Stepper(packet.settings.beaconMinutes == 0 ? "Timed beacon: off" : "Timed beacon: every \(packet.settings.beaconMinutes) min",
+                        value: $packet.settings.beaconMinutes, in: 0...30)
+                Toggle("Number my messages (request acks)", isOn: $packet.settings.requestAcks)
+                Toggle("Acknowledge messages to me", isOn: $packet.settings.autoAck)
+                Toggle("Block sending while the satellite is below the horizon", isOn: $packet.settings.blockBelowHorizon)
             }
-            HStack {
-                Text("Position comment")
-                Spacer()
-                TextField("grid + via OrbitDeck", text: $packet.settings.beaconComment)
-                    .multilineTextAlignment(.trailing).textFieldStyle(.odField).frame(width: 180)
+            Group {
+                Picker("Duplex", selection: $packet.settings.duplex) {
+                    ForEach(PacketDuplex.allCases) { Text($0.label).tag($0) }
+                }
+                Stepper("PTT watchdog: \(packet.settings.pttWatchdogSeconds) s", value: $packet.settings.pttWatchdogSeconds, in: 1...60)
+                Stepper("Persistence: \(packet.settings.persistence)", value: $packet.settings.persistence, in: 0...255, step: 16)
+                Stepper("Slot time: \(packet.settings.slotTimeMs) ms", value: $packet.settings.slotTimeMs, in: 10...500, step: 10)
+                Stepper("Max wait for a clear channel: \(packet.settings.maxChannelWaitSeconds) s", value: $packet.settings.maxChannelWaitSeconds, in: 1...30)
             }
-            Toggle("Acknowledge messages to me", isOn: $packet.settings.autoAck)
-            Text("Satellite digipeaters (ISS, and most amateur birds) answer the path ARISS. Keep transmissions short and infrequent — the channel is shared by everyone in the footprint.")
+            macroEditor
+            Text("Satellite digipeaters (ISS and most amateur birds) answer the path ARISS. Keep transmissions short and infrequent — the channel is shared by everyone in the footprint (a 1-minute beacon is the accepted minimum). Automatic duplex is full duplex only on a crossband transponder, where you can hear your own downlink; half duplex waits for a clear channel and ignores your own echo.")
                 .font(.caption).foregroundStyle(ODTheme.muted)
+        }
+    }
+
+    private var macroEditor: some View {
+        VStack(alignment: .leading, spacing: 6) {
+            HStack {
+                Text("Quick messages").font(.caption.weight(.semibold))
+                Spacer()
+                Button("Reset") { packet.settings.macros = PacketSettings.defaultMacros }.font(.caption).buttonStyle(.borderless)
+                Button { packet.settings.macros.append("") } label: { Image(systemName: "plus.circle") }
+                    .buttonStyle(.borderless)
+                    .disabled(packet.settings.macros.count >= 12)
+            }
+            ForEach(packet.settings.macros.indices, id: \.self) { i in
+                HStack {
+                    TextField("Macro", text: Binding(
+                        get: { i < packet.settings.macros.count ? packet.settings.macros[i] : "" },
+                        set: { if i < packet.settings.macros.count { packet.settings.macros[i] = $0 } }))
+                        .textInputAutocapitalization(.characters).autocorrectionDisabled()
+                        .textFieldStyle(.odField).font(.caption.monospaced())
+                    Button { packet.settings.macros.remove(at: i) } label: { Image(systemName: "minus.circle") }
+                        .buttonStyle(.borderless).foregroundStyle(ODTheme.warning)
+                }
+            }
+            Text("Placeholders: {MYCALL} {MYGRID} {MYGRID4} {CALL} (the To field) {HEARD} (calls heard this pass — UISS's MHeard). A macro of just {POSITION} sends your position. A macro starting with CQ always goes to CQ.")
+                .font(.caption2).foregroundStyle(ODTheme.muted)
         }
     }
 }
@@ -764,7 +956,18 @@ private struct PacketLogRow: View {
         if entry.direction == .sent { return .orange }
         if entry.ownDigipeated { return .cyan }
         if entry.toMe { return ODTheme.good }
+        if entry.isTelemetry { return ODTheme.muted }
         return .primary
+    }
+
+    private var tag: String? {
+        if entry.direction == .sent { return "TX" }
+        if entry.ownDigipeated { return "MY DIGI" }
+        if entry.toMe { return "TO ME" }
+        if entry.isTelemetry { return "TLM" }
+        if entry.isCQ { return "CQ" }
+        if entry.isBeacon { return "BCN" }
+        return nil
     }
 
     var body: some View {
@@ -773,30 +976,24 @@ private struct PacketLogRow: View {
                 HStack(spacing: 6) {
                     Text(ODFormat.axisClock(entry.date)).font(.caption2.monospacedDigit()).foregroundStyle(ODTheme.muted)
                     Text(entry.frame.source.description).font(.caption.weight(.semibold))
-                    if entry.direction == .sent { Text("TX").font(.caption2.weight(.bold)).foregroundStyle(.orange) }
-                    if entry.ownDigipeated { Image(systemName: "checkmark.seal.fill").font(.caption2).foregroundStyle(.cyan) }
+                    Text("→ \(entry.aprs.kind == .message || entry.aprs.kind == .ack ? entry.aprs.addressee : entry.frame.destination.description)")
+                        .font(.caption2).foregroundStyle(ODTheme.muted)
+                    if let tag { Text(tag).font(.caption2.weight(.bold)).foregroundStyle(color) }
+                    if let d = entry.digipeatDelay { Text(String(format: "+%.1f s", d)).font(.caption2.monospacedDigit()).foregroundStyle(.cyan) }
                     if entry.acked { Text("acked").font(.caption2).foregroundStyle(ODTheme.good) }
                     Spacer()
                     if let lat = entry.aprs.latitude, let lon = entry.aprs.longitude {
                         Text(FeatureEngine.latLonToGrid6(latitude: lat, longitude: lon).prefix(4))
                             .font(.caption2.monospacedDigit()).foregroundStyle(ODTheme.accent)
+                    } else if let g = PacketText.grid(in: entry.text) {
+                        Text(g.prefix(4)).font(.caption2.monospacedDigit()).foregroundStyle(ODTheme.accent)
                     }
                 }
-                Text(summary).font(.caption.monospaced()).foregroundStyle(color).lineLimit(3)
+                Text(entry.text.isEmpty ? entry.frame.monitorText : entry.text)
+                    .font(.caption.monospaced()).foregroundStyle(color).lineLimit(3)
             }
             .contentShape(Rectangle())
         }
         .buttonStyle(.plain)
-    }
-
-    private var summary: String {
-        let a = entry.aprs
-        switch a.kind {
-        case .message: return "→ \(a.addressee): \(a.text)"
-        case .ack: return "ack \(a.messageID ?? "") → \(a.addressee)"
-        case .status: return "status: \(a.comment)"
-        case .position, .micE: return a.comment.isEmpty ? "position" : a.comment
-        default: return entry.frame.monitorText
-        }
     }
 }

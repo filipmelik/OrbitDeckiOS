@@ -38,8 +38,8 @@ struct TrackView: View {
                                     MetricRow("Range", ODFormat.distance(look.rangeKm))
                                     MetricRow("Range rate", ODFormat.velocity(look.rangeRateKmS))
                                     MetricRow("Subpoint", String(format: "%.3f°, %.3f°", look.subLatitude, look.subLongitude))
-                                    MetricRow("Altitude", String(format: "%.1f km", look.altitudeKm))
-                                    MetricRow("Footprint radius", String(format: "%.0f km", look.footprintRadiusKm))
+                                    MetricRow("Altitude", ODFormat.units(String(format: "%.1f km", look.altitudeKm)))
+                                    MetricRow("Footprint radius", ODFormat.units(String(format: "%.0f km", look.footprintRadiusKm)))
                                     MetricRow("Illumination", look.sunlit ? "Sunlit" : "Eclipsed", valueColor: look.sunlit ? ODTheme.warning : ODTheme.muted)
                                 }
 

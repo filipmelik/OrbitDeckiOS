@@ -116,7 +116,7 @@ final class LocationProvider: NSObject, ObservableObject, @preconcurrency CLLoca
     func locationManagerDidChangeAuthorization(_ manager: CLLocationManager) {
         if manager.authorizationStatus == .authorizedAlways ||
             manager.authorizationStatus == .authorizedWhenInUse {
-            // Resume the follow that was pending authorization; otherwise honour the
+            // Resume the follow that was pending authorization; otherwise honor the
             // one-shot fill requested via requestLocation().
             if following { manager.startUpdatingLocation() } else { manager.requestLocation() }
             // Heading updates requested before authorization don't start until now,

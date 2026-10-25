@@ -1375,7 +1375,7 @@ extension BenchTools {
         case "tropo":
             var index=0; let spread=v("temp")-v("dew"); if spread<5{index+=1}; if v("inv")>=2{index+=2}; if v("inv")>=5{index+=1}; if v("wind")<=5{index+=1}; if v("wind")<=2{index+=1}; index=min(index,6)
             let labels=["none","weak","possible","fair","good","strong","very strong"]
-            return [row("Index","\(index) / 6",labels[index]),row("T−Td",String(format:"%.1f °C",spread)),row("Watch",index>=3 ? "yes":"no",index>=3 ? "conditions may support enhancement":"ordinary refraction more likely")]
+            return [row("Index","\(index) / 6",labels[index]),row("T−Td",ODFormat.usesCustomary ? String(format:"%.1f F°",spread*1.8) : String(format:"%.1f C°",spread)),row("Watch",index>=3 ? "yes":"no",index>=3 ? "conditions may support enhancement":"ordinary refraction more likely")]
         case "rainfade":
             let f=max(v("freq"),0.1),r=max(v("rain"),0),d=max(v("distance"),0); let k=0.0001*pow(f,1.65),gamma=k*pow(max(r,0.01),0.9),loss=gamma*d
             return [row("Specific loss",String(format:"%.3f dB/km",gamma)),row("Path fade",String(format:"%.2f dB",loss)),row("Note",f<5 ? "usually small below ~5 GHz":"planning approximation")]
@@ -1431,7 +1431,7 @@ extension BenchTools {
             var out=[row("Z0",String(format:"%.1f Ω",z0)),row("ε effective",String(format:"%.2f",eeff))]; if v("freq")>0 { let q=74948.1/(v("freq")*sqrt(eeff)); out.append(row("90° line",String(format:"%.1f mm",q))); out.append(row("Guided λ",String(format:"%.1f mm",4*q))) }; return out
         case "thermal":
             let materials:[(String,Double,Double)]=[("Custom",v("alpha"),v("epsilon")),("Black anodized",0.86,0.86),("Bare aluminum",0.15,0.05),("White paint",0.20,0.88)], m=materials[max(0,min(materials.count-1,Int(v("material"))))],alpha=max(m.1,1e-9),epsilon=max(m.2,1e-9),solar=1361.0,sigma=5.670374419e-8,t1=pow(alpha*solar/(epsilon*sigma),0.25),t2=pow(alpha*solar/(2*epsilon*sigma),0.25)
-            return [row("Surface",m.0),row("α / ε",String(format:"%.2f / %.2f = %.2f",alpha,epsilon,alpha/epsilon)),row("1-side radiation",String(format:"%.0f °C (%.0f K)",t1-273.15,t1)),row("2-side radiation",String(format:"%.0f °C (%.0f K)",t2-273.15,t2)),row("Eclipse","roughly −60…−100 °C","first order; no albedo/internal heat")]
+            return [row("Surface",m.0),row("α / ε",String(format:"%.2f / %.2f = %.2f",alpha,epsilon,alpha/epsilon)),row("1-side radiation",String(format:"%.0f °C (%.0f K)",t1-273.15,t1)),row("2-side radiation",String(format:"%.0f °C (%.0f K)",t2-273.15,t2)),row("Eclipse","roughly −60 °C to −100 °C","first order; no albedo/internal heat")]
         case "crosssection":
             let forms:[(String,Double,Double,Double)]=[("Custom",v("x"),v("y"),v("z")),("1U CubeSat",10,10,10),("2U CubeSat",10,10,20),("3U CubeSat",10,10,30)],f=forms[max(0,min(forms.count-1,Int(v("form"))))],a=f.1/100,b=f.2/100,c=f.3/100,panel=max(v("panel"),0),ab=a*b,bc=b*c,ca=c*a,minf=min(ab,min(bc,ca)),maxf=max(ab,max(bc,ca)),maxproj=sqrt(ab*ab+bc*bc+ca*ca),tumble=(ab+bc+ca)/2
             return [row("Form",f.0),row("End-on minimum",String(format:"%.4f m²",minf)),row("Broadside",String(format:"%.4f m²",maxf+panel)),row("Max any angle",String(format:"%.4f m²",maxproj+panel)),row("Tumbling avg",String(format:"%.4f m²",tumble+panel/2))]

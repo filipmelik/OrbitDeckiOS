@@ -19,7 +19,7 @@ struct ObserverSite: Codable, Equatable, Sendable {
     /// Location rounded to ~1 km, for the heaviest recomputes (pass lists, daily
     /// schedule). While following the device at coarse GPS precision the fix can
     /// jitter by hundreds of meters each second — enough to flip `coarseKey` and
-    /// keep cancelling multi-second loads before they finish. Passes don't change
+    /// keep canceling multi-second loads before they finish. Passes don't change
     /// meaningfully over ~1 km, so this key stays stable while stationary.
     var stableKey: String { String(format: "%.2f,%.2f", latitude, longitude) }
 }
@@ -236,6 +236,12 @@ struct StorePreferences: Codable, Sendable {
     // Display all times in the device's local zone instead of UTC. Optional
     // preserves decoding of older preference blobs; nil is treated as UTC.
     var useLocalTime: Bool?
+    // Operator overrides of the built-in GP source URLs (nil = default). The
+    // CelesTrak override replaces the whole group URL. Optional for old blobs.
+    var amsatURLOverride: String?
+    /// Metric / US customary display preference (nil = follow the device region).
+    var unitSystem: UnitSystem?
+    var celestrakURLOverride: String?
     // NOTE: CAT (rig control) configuration is intentionally NOT stored here.
     // It lives in its own UserDefaults key (see RigController) so that evolving
     // its schema can never break decoding of the main preferences blob and reset

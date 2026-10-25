@@ -219,7 +219,7 @@ struct SatellitesView: View {
                 VStack(alignment: .trailing, spacing: 3) {
                     Text(String(format: "%.1f°", satellite.inclinationDeg))
                         .font(.caption.monospacedDigit())
-                    Text(String(format: "%.0f–%.0f km", satellite.perigeeKm, satellite.apogeeKm))
+                    Text(ODFormat.units(String(format: "%.0f–%.0f km", satellite.perigeeKm, satellite.apogeeKm)))
                         .font(.caption2.monospacedDigit())
                         .foregroundStyle(ODTheme.muted)
                 }

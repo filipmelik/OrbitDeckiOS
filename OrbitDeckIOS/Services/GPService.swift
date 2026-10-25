@@ -64,8 +64,10 @@ struct GPService {
     static func sourceURL(preferences: StorePreferences) throws -> URL {
         switch preferences.sourceKind {
         case .amsat:
+            if let o = preferences.amsatURLOverride, !o.isEmpty { return try httpsURL(o) }
             return amsatURL
         case .celestrak:
+            if let o = preferences.celestrakURLOverride, !o.isEmpty { return try httpsURL(o) }
             guard let url = URL(string: celestrakBase + preferences.celestrakGroup) else {
                 throw GPServiceError.invalidURL
             }
@@ -78,6 +80,21 @@ struct GPService {
             }
             return url
         }
+    }
+
+    /// The default URL for a source (what an override replaces).
+    static func defaultURLString(_ preferences: StorePreferences) -> String {
+        switch preferences.sourceKind {
+        case .amsat: return amsatURL.absoluteString
+        case .celestrak: return celestrakBase + preferences.celestrakGroup
+        case .custom: return ""
+        }
+    }
+
+    private static func httpsURL(_ text: String) throws -> URL {
+        guard let url = URL(string: text.trimmingCharacters(in: .whitespaces)),
+              url.scheme?.lowercased() == "https", url.host != nil else { throw GPServiceError.invalidURL }
+        return url
     }
 
     static func fetch(preferences: StorePreferences) async throws -> (records: [SatelliteRecord], rawData: Data) {

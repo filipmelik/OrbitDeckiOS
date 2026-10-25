@@ -89,10 +89,10 @@ struct GroundTrackView: View {
                         if let current {
                             VStack(alignment: .leading, spacing: 3) {
                                 Text(ODFormat.utc.string(from: current.date))
-                                Text(String(format: "%.3f°, %.3f°  •  %.1f km",
+                                Text(ODFormat.units(String(format: "%.3f°, %.3f°  •  %.1f km",
                                             current.coordinate.latitude,
                                             current.coordinate.longitude,
-                                            current.altitudeKm))
+                                            current.altitudeKm)))
                             }
                             .font(.caption.monospacedDigit())
                             .padding(10)

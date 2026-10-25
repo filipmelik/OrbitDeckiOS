@@ -168,7 +168,7 @@ struct SunMoonView: View {
                     HStack {
                         Label(ODFormat.utc.string(from: timeline.date), systemImage: "clock")
                         Spacer()
-                        Text(String(format: "Moon distance %.0f km", snapshot.moonDistanceKm))
+                        Text(ODFormat.units(String(format: "Moon distance %.0f km", snapshot.moonDistanceKm)))
                     }
                     .font(.caption.monospaced())
                     .foregroundStyle(ODTheme.muted)
@@ -980,7 +980,7 @@ struct PlanningView: View {
                 ForEach(losWindows) { w in
                     VStack(alignment: .leading) {
                         Text(ODFormat.utc.string(from: w.start)).font(.headline.monospaced())
-                        Text("to \(ODFormat.utc.string(from: w.end)) • \(ODFormat.duration(w.duration))\(w.minRangeKm > 0 ? " • min range \(String(format: "%.0f km", w.minRangeKm))" : "")")
+                        Text("to \(ODFormat.utc.string(from: w.end)) • \(ODFormat.duration(w.duration))\(w.minRangeKm > 0 ? " • min range \(ODFormat.units(String(format: "%.0f km", w.minRangeKm)))" : "")")
                             .font(.caption.monospaced()).foregroundStyle(ODTheme.muted)
                     }
                 }
@@ -1192,8 +1192,8 @@ struct ConjunctionView: View {
                         Text("6 h").tag(6.0); Text("12 h").tag(12.0); Text("24 h").tag(24.0)
                     }
                     Picker("Alert threshold", selection: $thresholdKm) {
-                        Text("100 km").tag(100.0); Text("500 km").tag(500.0)
-                        Text("800 km").tag(800.0); Text("2000 km").tag(2000.0)
+                        Text(ODFormat.units("100 km")).tag(100.0); Text(ODFormat.units("500 km")).tag(500.0)
+                        Text(ODFormat.units("800 km")).tag(800.0); Text(ODFormat.units("2000 km")).tag(2000.0)
                     }
                     Button("Screen pair") { screenPair() }
                         .disabled(isLoading || store.selectedSatellite == nil || secondary == nil)
@@ -1222,11 +1222,11 @@ struct ConjunctionView: View {
                                 HStack {
                                     VStack(alignment: .leading) {
                                         Text(ODFormat.utc.string(from: item.date)).font(.headline.monospaced())
-                                        Text(String(format: "Δv %.3f km/s", item.relativeVelocityKmS))
+                                        Text(ODFormat.units(String(format: "Δv %.3f km/s", item.relativeVelocityKmS)))
                                             .font(.caption.monospaced()).foregroundStyle(ODTheme.muted)
                                     }
                                     Spacer()
-                                    Text(String(format: "%.1f km", item.missDistanceKm))
+                                    Text(ODFormat.units(String(format: "%.1f km", item.missDistanceKm)))
                                         .font(.body.monospaced()).foregroundStyle(ODTheme.warning)
                                 }
                             }.buttonStyle(.plain)
@@ -1237,12 +1237,12 @@ struct ConjunctionView: View {
                 if let detail, let primary = store.selectedSatellite, let secondary {
                     Section("TCA detail") {
                         LabeledContent("Closest approach", value: ODFormat.utc.string(from: detail.date))
-                        LabeledContent("Miss distance", value: String(format: "%.3f km", detail.missDistanceKm))
-                        LabeledContent("Relative velocity", value: String(format: "%.4f km/s", detail.relativeVelocityKmS))
-                        LabeledContent("Separation rate at TCA", value: String(format: "%+.5f km/s", detail.closingRateKmS))
-                        LabeledContent("\(primary.name) altitude", value: String(format: "%.1f km", detail.primaryAltitudeKm))
-                        LabeledContent("\(secondary.name) altitude", value: String(format: "%.1f km", detail.secondaryAltitudeKm))
-                        LabeledContent("Object speeds", value: String(format: "%.3f / %.3f km/s", detail.primarySpeedKmS, detail.secondarySpeedKmS))
+                        LabeledContent("Miss distance", value: ODFormat.units(String(format: "%.3f km", detail.missDistanceKm)))
+                        LabeledContent("Relative velocity", value: ODFormat.units(String(format: "%.4f km/s", detail.relativeVelocityKmS)))
+                        LabeledContent("Separation rate at TCA", value: ODFormat.units(String(format: "%+.5f km/s", detail.closingRateKmS)))
+                        LabeledContent("\(primary.name) altitude", value: ODFormat.units(String(format: "%.1f km", detail.primaryAltitudeKm)))
+                        LabeledContent("\(secondary.name) altitude", value: ODFormat.units(String(format: "%.1f km", detail.secondaryAltitudeKm)))
+                        LabeledContent("Object speeds", value: ODFormat.units(String(format: "%.3f / %.3f km/s", detail.primarySpeedKmS, detail.secondarySpeedKmS)))
                         Text(detail.awarenessLabel).font(.caption.bold()).foregroundStyle(ODTheme.warning)
                         Chart(detail.curve) { point in
                             LineMark(x: .value("Time", point.date), y: .value("Separation km", point.separationKm))
@@ -1279,7 +1279,7 @@ struct ConjunctionView: View {
                                 Spacer()
                                 VStack(alignment: .trailing) {
                                     Text(ODFormat.distance(item.rangeKm)).font(.body.monospaced())
-                                    Text(String(format: "Δv %.2f km/s", item.relativeVelocityKmS))
+                                    Text(ODFormat.units(String(format: "Δv %.2f km/s", item.relativeVelocityKmS)))
                                         .font(.caption.monospaced()).foregroundStyle(ODTheme.muted)
                                 }
                             }
@@ -1754,7 +1754,7 @@ struct EMEView: View {
                         }
                         LabeledContent("Azimuth", value: "\(ODFormat.angle(snapshot.moonAzimuth)) \(ODFormat.compass(snapshot.moonAzimuth))")
                         LabeledContent("Elevation", value: String(format: "%+.1f°", snapshot.moonElevation))
-                        LabeledContent("Distance", value: String(format: "%.0f km", snapshot.moonDistanceKm))
+                        LabeledContent("Distance", value: ODFormat.units(String(format: "%.0f km", snapshot.moonDistanceKm)))
                         LabeledContent("Declination", value: String(format: "%+.1f°", FeatureCompletionEngine.moonDeclinationDegrees(at: timeline.date)))
                         LabeledContent("Path degradation", value: String(format: "%.2f dB", FeatureCompletionEngine.emePathDegradationDb(at: timeline.date)))
                         LabeledContent("Sun separation", value: String(format: "%.0f°", FeatureCompletionEngine.emeSunSeparationDegrees(site: store.preferences.observer, at: timeline.date)))
@@ -1815,7 +1815,7 @@ struct EMEView: View {
                                 Spacer()
                                 Text(String(format: "%+.1f°", row.declinationDegrees)).font(.caption.monospaced())
                                 Text(String(format: "%.2f dB", row.degradationDb)).font(.caption.monospaced())
-                                Text(String(format: "%.0f km", row.distanceKm)).font(.caption.monospaced())
+                                Text(ODFormat.units(String(format: "%.0f km", row.distanceKm))).font(.caption.monospaced())
                                 if row.good { Image(systemName: "star.fill").foregroundStyle(ODTheme.good) }
                             }
                         }
@@ -1962,8 +1962,8 @@ struct TransitsView: View {
                                         .monospacedDigit().foregroundStyle(ODTheme.accent)
                                 }
                                 Text(ODFormat.utc.string(from: event.date)).font(.subheadline.monospaced())
-                                Text(String(format: "Sat %.0f° az / %.0f° el • %.0f km",
-                                            event.satelliteAzimuth, event.satelliteElevation, event.rangeKm))
+                                Text(ODFormat.units(String(format: "Sat %.0f° az / %.0f° el • %.0f km",
+                                            event.satelliteAzimuth, event.satelliteElevation, event.rangeKm)))
                                     .font(.caption).foregroundStyle(ODTheme.muted)
                             }
                         }
@@ -2264,9 +2264,9 @@ struct AstronomyView: View {
         case 4:
             let snapshot = FeatureEngine.emeConditions()
             Section("EME conditions") {
-                LabeledContent("Moon distance", value: String(format: "%.0f km", snapshot.distanceKm))
-                LabeledContent("Perigee (30 d)", value: String(format: "%.0f km • %@", snapshot.perigeeKm, ODFormat.utcShort.string(from: snapshot.perigeeDate)))
-                LabeledContent("Apogee (30 d)", value: String(format: "%.0f km • %@", snapshot.apogeeKm, ODFormat.utcShort.string(from: snapshot.apogeeDate)))
+                LabeledContent("Moon distance", value: ODFormat.units(String(format: "%.0f km", snapshot.distanceKm)))
+                LabeledContent("Perigee (30 d)", value: ODFormat.units(String(format: "%.0f km • %@", snapshot.perigeeKm, ODFormat.utcShort.string(from: snapshot.perigeeDate))))
+                LabeledContent("Apogee (30 d)", value: ODFormat.units(String(format: "%.0f km • %@", snapshot.apogeeKm, ODFormat.utcShort.string(from: snapshot.apogeeDate))))
                 LabeledContent("Path degradation", value: String(format: "%.2f dB vs perigee", snapshot.degradationDb))
                 LabeledContent("Perigee–apogee swing", value: String(format: "%.2f dB", snapshot.swingDb))
                 LabeledContent("Declination", value: String(format: "%+.1f°", snapshot.declinationDegrees))
@@ -2606,6 +2606,10 @@ struct OrbitalHistoryView: View {
 
     private func rateText(_ rate: Double) -> String {
         let unit = selectedColumn.unit.isEmpty ? "units" : selectedColumn.unit
+        // km-based columns follow the unit setting (km/year ↔ mi/year).
+        if let conv = UnitConversion.inputConversion(for: unit, toCustomary: ODFormat.usesCustomary) {
+            return String(format: "%+.5g %@/year", conv.toShown(rate), conv.shown)
+        }
         return String(format: "%+.5g %@/year", rate, unit)
     }
 
@@ -2777,7 +2781,7 @@ struct NewLaunchesView: View {
                         .font(.caption).foregroundStyle(ODTheme.muted)
                 }
                 if !hasScanned {
-                    Text("The scan is user-initiated. It lists satellites SatNOGS records as launched in the chosen window that have documented transmitters, then matches each to CelesTrak by international designator to get its real (now six-digit) NORAD number. Objects CelesTrak hasn't catalogued yet use SatNOGS's elements and temporary ID.")
+                    Text("The scan is user-initiated. It lists satellites SatNOGS records as launched in the chosen window that have documented transmitters, then matches each to CelesTrak by international designator to get its real (now six-digit) NORAD number. Objects CelesTrak hasn't cataloged yet use SatNOGS's elements and temporary ID.")
                         .font(.caption).foregroundStyle(ODTheme.muted)
                 }
             }
@@ -2827,11 +2831,11 @@ struct NewLaunchesView: View {
                                 }
                                 .buttonStyle(.borderedProminent)
                                 Text(hit.placeholderNorad
-                                     ? "Not catalogued by CelesTrak yet: adds SatNOGS's elements under its temporary ID; they refresh from SatNOGS."
+                                     ? "Not cataloged by CelesTrak yet: adds SatNOGS's elements under its temporary ID; they refresh from SatNOGS."
                                      : "Adds this CelesTrak element set now and keeps the NORAD ID on the normal refresh path.")
                                     .font(.caption).foregroundStyle(ODTheme.muted)
                             } else {
-                                Text("No orbital elements published yet. Check again after the objects are catalogued.")
+                                Text("No orbital elements published yet. Check again after the objects are cataloged.")
                                     .font(.caption).foregroundStyle(ODTheme.muted)
                             }
                         }
@@ -2853,7 +2857,7 @@ struct NewLaunchesView: View {
     }
 
     private func scan() {
-        // The launch scan is a bulk CelesTrak group query (last-30-days); honour
+        // The launch scan is a bulk CelesTrak group query (last-30-days); honor
         // CelesTrak's one-request-per-2-hours policy to avoid an IP ban.
         guard store.celestrakAllowed("newlaunch") else {
             hasScanned = true
@@ -3005,8 +3009,8 @@ struct MUFView: View {
                 Spacer()
                 Text(String(format: "%.1f MHz", r.mufMHz)).font(.body.monospacedDigit()).foregroundStyle(ODTheme.accent)
             }
-            Text(String(format: "Workable %.1f MHz • %@ • %.0f km • %03.0f°",
-                        r.workableMHz, r.bestBand, r.distanceKm, r.bearingDegrees))
+            Text(ODFormat.units(String(format: "Workable %.1f MHz • %@ • %.0f km • %03.0f°",
+                        r.workableMHz, r.bestBand, r.distanceKm, r.bearingDegrees)))
                 .font(.caption.monospacedDigit()).foregroundStyle(ODTheme.muted)
         }
     }
@@ -3907,7 +3911,15 @@ struct SitesView: View {
                 TextField("Maidenhead grid or latitude,longitude", text: $newLocation)
                     .textInputAutocapitalization(.characters)
                     .textFieldStyle(.odField)
-                HStack { Text("Altitude"); Spacer(); TextField("m", value: $newAltitude, format: .number).keyboardType(.numbersAndPunctuation).multilineTextAlignment(.trailing).textFieldStyle(.odField) }
+                HStack {
+                    Text("Altitude (\(ODFormat.heightUnit))"); Spacer()
+                    // newAltitude is meters; entered in the chosen unit.
+                    TextField(ODFormat.heightUnit, value: Binding(
+                        get: { ODFormat.usesCustomary ? newAltitude * UnitConversion.ftPerM : newAltitude },
+                        set: { newAltitude = ODFormat.usesCustomary ? $0 / UnitConversion.ftPerM : $0 }
+                    ), format: .number.precision(.fractionLength(0...1)))
+                    .keyboardType(.numbersAndPunctuation).multilineTextAlignment(.trailing).textFieldStyle(.odField)
+                }
                 Button { pollCurrentLocation() } label: { Label("Use current location", systemImage: "location") }
                 Button("Add Site") { addSite() }
                 if !message.isEmpty { Text(message).font(.caption).foregroundStyle(ODTheme.muted) }
@@ -3977,8 +3989,8 @@ struct SitesView: View {
     @ViewBuilder private func siteSummary(_ site: ObserverSite) -> some View {
         VStack(alignment: .leading, spacing: 2) {
             Text(site.name).font(.headline)
-            Text(String(format: "%.4f, %.4f • %@ • %.0f m", site.latitude, site.longitude,
-                        FeatureEngine.latLonToGrid6(latitude: site.latitude, longitude: site.longitude), site.altitudeMeters))
+            Text(ODFormat.units(String(format: "%.4f, %.4f • %@ • %.0f m", site.latitude, site.longitude,
+                        FeatureEngine.latLonToGrid6(latitude: site.latitude, longitude: site.longitude), site.altitudeMeters)))
                 .font(.caption.monospacedDigit()).foregroundStyle(ODTheme.muted)
         }
     }

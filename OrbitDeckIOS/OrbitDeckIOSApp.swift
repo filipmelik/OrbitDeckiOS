@@ -14,6 +14,8 @@ struct OrbitDeckIOSApp: App {
     @StateObject private var voice = RemoteVoiceController()
     @StateObject private var autoSwitch = AutoSwitchController()
     @StateObject private var packet = PacketEngine()
+    @StateObject private var liveActivity = LiveActivityController()
+    @Environment(\.scenePhase) private var scenePhase
 
     var body: some Scene {
         WindowGroup {
@@ -30,6 +32,7 @@ struct OrbitDeckIOSApp: App {
                 .environmentObject(voice)
                 .environmentObject(autoSwitch)
                 .environmentObject(packet)
+                .environmentObject(liveActivity)
                 .preferredColorScheme(.dark)
                 .task {
                     notifications.activate()
@@ -45,6 +48,11 @@ struct OrbitDeckIOSApp: App {
                     await store.bootstrap()
                     // After bootstrap so the first tick sees the loaded catalog/selection.
                     autoSwitch.attach(store)
+                    liveActivity.attach(store: store, autoSwitch: autoSwitch)
+                }
+                .onChange(of: scenePhase) { _, phase in
+                    // A Live Activity can only start in the foreground.
+                    if phase == .active { Task { await liveActivity.refresh() } }
                 }
         }
     }

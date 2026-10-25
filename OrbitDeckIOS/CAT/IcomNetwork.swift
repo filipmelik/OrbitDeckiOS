@@ -353,7 +353,7 @@ final class IcomNetworkTransport: NSObject, CATTransport, @unchecked Sendable {
     /// reconnect. Runs on the network queue; guarded so the two error paths act once.
     private func handleStale() {
         guard connected else { return }
-        ODLog.shared.log("icom-net live drop (watchdog) — freeing session and signalling reconnect", category: "cat")
+        ODLog.shared.log("icom-net live drop (watchdog) — freeing session and signaling reconnect", category: "cat")
         teardown()
         onDisconnect?()
     }
@@ -366,7 +366,7 @@ final class IcomNetworkTransport: NSObject, CATTransport, @unchecked Sendable {
     private func handleSocketError(_ e: Error) {
         if connectCont != nil { finishConnect(.failure(e)); return }
         guard connected else { return }        // already torn down by the first socket's error
-        ODLog.shared.log("icom-net live drop — freeing session and signalling reconnect", category: "cat")
+        ODLog.shared.log("icom-net live drop — freeing session and signaling reconnect", category: "cat")
         teardown()
         onDisconnect?()
     }

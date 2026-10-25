@@ -9,6 +9,8 @@ struct SettingsView: View {
     @State private var gridEntry = ""
     @State private var gridMessage: String?
     @AppStorage("orbitdeck.keepScreenAwakeHome") private var keepScreenAwakeHome = false
+    @AppStorage(LiveActivityController.enabledKey) private var liveActivityEnabled = true
+    @EnvironmentObject private var liveActivity: LiveActivityController
     @AppStorage(FeatureVisibility.recorderKey) private var featureRecorder = FeatureVisibility.auto
     @AppStorage(FeatureVisibility.sstvKey) private var featureSSTV = FeatureVisibility.auto
     @AppStorage(FeatureVisibility.ft4Key) private var featureFT4 = FeatureVisibility.auto
@@ -26,6 +28,42 @@ struct SettingsView: View {
     @State private var showRotatorControl = false
     @State private var confirmClearCredentials = false
     @State private var showDiagnostics = false
+
+    /// Editable source URL for the AMSAT / CelesTrak feeds: shows the default until
+    /// edited; an edited value overrides it (HTTPS only) until reset.
+    @ViewBuilder private func sourceURLField(_ key: WritableKeyPath<StorePreferences, String?>) -> some View {
+        let override = store.preferences[keyPath: key] ?? ""
+        let shown = override.isEmpty ? GPService.defaultURLString(store.preferences) : override
+        VStack(alignment: .leading, spacing: 4) {
+            HStack {
+                Text("Source URL").font(.caption.weight(.semibold))
+                Spacer()
+                if !override.isEmpty {
+                    Button("Reset to default") { store.preferences[keyPath: key] = nil }
+                        .font(.caption).buttonStyle(.borderless)
+                }
+            }
+            TextField("https://…", text: Binding(
+                get: { shown },
+                set: { new in
+                    let t = new.trimmingCharacters(in: .whitespacesAndNewlines)
+                    store.preferences[keyPath: key] = (t.isEmpty || t == GPService.defaultURLString(store.preferences)) ? nil : t
+                }
+            ))
+            .textInputAutocapitalization(.never)
+            .autocorrectionDisabled()
+            .keyboardType(.URL)
+            .textFieldStyle(.odField)
+            .font(.caption.monospaced())
+            if !override.isEmpty {
+                Text(URL(string: override)?.scheme?.lowercased() == "https"
+                     ? "Using your URL instead of the built-in one. It must return OMM/GP JSON."
+                     : "The URL must start with https://.")
+                    .font(.caption2)
+                    .foregroundStyle(URL(string: override)?.scheme?.lowercased() == "https" ? ODTheme.muted : ODTheme.warning)
+            }
+        }
+    }
 
     var body: some View {
         Form {
@@ -70,13 +108,15 @@ struct SettingsView: View {
                 .disabled(following)
 
                 HStack {
+                    // Stored in meters; entered in the chosen unit (m or ft).
                     TextField("Altitude", value: Binding(
-                        get: { store.preferences.observer.altitudeMeters },
-                        set: { store.preferences.observer.altitudeMeters = $0 }
+                        get: { ODFormat.usesCustomary ? store.preferences.observer.altitudeMeters * UnitConversion.ftPerM
+                                                      : store.preferences.observer.altitudeMeters },
+                        set: { store.preferences.observer.altitudeMeters = ODFormat.usesCustomary ? $0 / UnitConversion.ftPerM : $0 }
                     ), format: .number.precision(.fractionLength(0...1)))
                     .keyboardType(.numbersAndPunctuation)
                     .textFieldStyle(.odField)
-                    Text("m").foregroundStyle(ODTheme.muted)
+                    Text(ODFormat.heightUnit).foregroundStyle(ODTheme.muted)
                 }
                 .disabled(following)
 
@@ -283,11 +323,23 @@ struct SettingsView: View {
             }
 
             Section {
+                Picker("Units", selection: Binding(
+                    get: { store.preferences.unitSystem ?? .system },
+                    set: { store.preferences.unitSystem = $0 }
+                )) {
+                    ForEach(UnitSystem.allCases) { Text($0.label).tag($0) }
+                }
+                Text("Distances, altitudes, speeds, lengths and temperatures throughout the app, including the Tools calculators. Automatic follows your iPhone's region (US customary in the United States). Exported files (CSV, JSON, ADIF and PDF reports) stay metric, with the units in their column names, so other software reads them consistently.")
+                    .font(.caption).foregroundStyle(ODTheme.muted)
                 Toggle("Show times in local time", isOn: Binding(
                     get: { store.preferences.useLocalTime ?? false },
                     set: { store.preferences.useLocalTime = $0 }
                 ))
                 Text("Display all times in your device's local zone instead of UTC. Pass lists also show the other zone. Tiny BASIC always uses UTC.")
+                    .font(.caption).foregroundStyle(ODTheme.muted)
+                Toggle("Next pass on Lock Screen and Dynamic Island", isOn: $liveActivityEnabled)
+                    .onChange(of: liveActivityEnabled) { _, _ in Task { await liveActivity.refresh() } }
+                Text("A Live Activity counts down to the next AOS, then to LOS. With auto switching on it shows the next satellite from your priority list and when it switches in; otherwise the next pass of any favorite. It refreshes whenever OrbitDeck runs. iOS ends Live Activities after about 8 hours, and opening the app starts a new one.")
                     .font(.caption).foregroundStyle(ODTheme.muted)
                 Toggle("Keep screen awake on Home", isOn: $keepScreenAwakeHome)
                 Text("Prevents auto-lock while the Home screen is showing, so you can leave it up as a live display during a pass. The rest of the app auto-locks normally.")
@@ -310,6 +362,7 @@ struct SettingsView: View {
                 case .amsat:
                     Text("Uses the AMSAT daily bulletin GP JSON feed.")
                         .font(.caption).foregroundStyle(ODTheme.muted)
+                    sourceURLField(\.amsatURLOverride)
                 case .celestrak:
                     Picker("Group", selection: Binding(
                         get: { store.preferences.celestrakGroup },
@@ -319,6 +372,8 @@ struct SettingsView: View {
                             Text(group.name).tag(group.id)
                         }
                     }
+                    .disabled(!(store.preferences.celestrakURLOverride ?? "").isEmpty)
+                    sourceURLField(\.celestrakURLOverride)
                 case .custom:
                     TextField("OMM JSON URL", text: Binding(
                         get: { store.preferences.customURL },
