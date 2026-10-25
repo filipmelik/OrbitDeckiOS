@@ -12,6 +12,7 @@ struct SettingsView: View {
     @AppStorage(FeatureVisibility.recorderKey) private var featureRecorder = FeatureVisibility.auto
     @AppStorage(FeatureVisibility.sstvKey) private var featureSSTV = FeatureVisibility.auto
     @AppStorage(FeatureVisibility.ft4Key) private var featureFT4 = FeatureVisibility.auto
+    @AppStorage(FeatureVisibility.packetKey) private var featurePacket = FeatureVisibility.auto
     @AppStorage(FeatureVisibility.remoteAudioKey) private var featureRemoteAudio = FeatureVisibility.auto
     @AppStorage(PSKReporterSettings.enabledKey) private var pskReporterEnabled = false
     @AppStorage(FT4Settings.dataModeKey) private var ft4DataMode = true
@@ -198,6 +199,10 @@ struct SettingsView: View {
                 Picker(selection: $featureFT4) {
                     ForEach(FeatureVisibility.allCases) { Text($0.label).tag($0) }
                 } label: { Label("FT4", systemImage: "dot.radiowaves.left.and.right") }
+                .pickerStyle(.menu)
+                Picker(selection: $featurePacket) {
+                    ForEach(FeatureVisibility.allCases) { Text($0.label).tag($0) }
+                } label: { Label("Packet / APRS", systemImage: "envelope.badge") }
                 .pickerStyle(.menu)
                 Picker(selection: $featureRemoteAudio) {
                     ForEach(FeatureVisibility.allCases) { Text($0.label).tag($0) }

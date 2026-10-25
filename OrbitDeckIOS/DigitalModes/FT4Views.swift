@@ -551,3 +551,252 @@ struct HomeFT4Card: View {
         }
     }
 }
+
+// ###########################################################################
+//  PACKET / APRS (Home card)
+//
+//  Kept in this file (rather than its own) because new source files have to be
+//  added to the Xcode target by hand; this file is already in the target.
+// ###########################################################################
+
+// ===========================================================================
+//  PacketViews.swift — Home "Packet / APRS" card (monitor + compose + setup)
+// ===========================================================================
+
+struct HomePacketCard: View {
+    @EnvironmentObject private var packet: PacketEngine
+    @EnvironmentObject private var audio: AudioHub
+    @EnvironmentObject private var rig: RigController
+    @AppStorage(FeatureVisibility.packetKey) private var visibility = FeatureVisibility.auto
+    @State private var showSetup = false
+    @State private var pickingAdapter = false
+    @State private var messageTo = ""
+    @State private var messageText = ""
+    let satellite: SatelliteRecord
+
+    /// Auto: show when this satellite has a packet transponder and there's a way to
+    /// reach a radio (audio interface or a chosen KISS adapter), or while running.
+    private var visible: Bool {
+        switch visibility {
+        case .off: return false
+        case .always: return true
+        case .auto:
+            if packet.isRunning { return true }
+            let hasPacket = satellite.transponders.contains { tp in
+                let h = "\(tp.mode) \(tp.description)".uppercased()
+                return ["APRS", "AFSK", "PACKET", "DIGI"].contains { h.contains($0) }
+            }
+            let reachable = audio.audioAvailable
+                || (packet.settings.transport == .bleKISS && !packet.settings.bleIdentifier.isEmpty)
+            return hasPacket && reachable
+        }
+    }
+
+    var body: some View {
+        if visible {
+            SectionCard("Packet / APRS") {
+                if !packet.errorText.isEmpty {
+                    Text(packet.errorText).font(.caption).foregroundStyle(ODTheme.warning)
+                }
+                HStack(spacing: 10) {
+                    Circle().fill(packet.isTransmitting ? ODTheme.warning : (packet.isRunning ? ODTheme.good : ODTheme.muted))
+                        .frame(width: 10, height: 10)
+                    Text(packet.status).font(.subheadline.weight(.semibold)).lineLimit(1).minimumScaleFactor(0.8)
+                    Spacer()
+                    Button(packet.isRunning ? "Stop" : "Start") {
+                        if packet.isRunning { packet.stop() } else { packet.start(satellite: satellite) }
+                    }
+                    .buttonStyle(.bordered)
+                }
+                infoLine
+
+                if packet.isRunning {
+                    if packet.settings.transport == .builtInModem {
+                        AudioLevelControl(title: "RX level", gain: Binding(
+                            get: { packet.settings.inputGain },
+                            set: { packet.settings.inputGain = $0 }), level: packet.rxLevel)
+                    }
+                    monitor
+                    compose
+                }
+
+                DisclosureGroup("Setup", isExpanded: $showSetup) { setup.padding(.top, 4) }
+                    .font(.subheadline).tint(ODTheme.accent)
+            }
+            .task(id: satellite.id) { await packet.tuneBBLink(for: satellite) }
+            .sheet(isPresented: $pickingAdapter) {
+                NavigationStack {
+                    BLEPickerView(selectedID: packet.settings.bleIdentifier) { dev in
+                        packet.settings.bleIdentifier = dev.id.uuidString
+                        packet.settings.bleName = dev.name
+                    }
+                }
+            }
+        }
+    }
+
+    // MARK: Pieces
+
+    private var infoLine: some View {
+        let tp = packet.packetTransponder(for: satellite)
+        let duplex = rig.isSplitVFO || (tp.map { $0.uplinkCenter > 0 && abs($0.uplinkCenter - $0.downlinkCenter) < 10_000_000 } ?? true)
+        var parts: [String] = []
+        if let me = packet.myAddress { parts.append(me.description) }
+        parts.append("via \(packet.settings.path.isEmpty ? "direct" : packet.settings.path)")
+        if let tp { parts.append(ODFormat.frequency(tp.downlinkCenter)) }
+        parts.append(duplex ? "half duplex" : "full duplex")
+        return VStack(alignment: .leading, spacing: 2) {
+            Text(parts.joined(separator: " · ")).font(.caption.monospacedDigit()).foregroundStyle(ODTheme.muted)
+            HStack(spacing: 8) {
+                if packet.channelBusy { Label("Channel busy", systemImage: "dot.radiowaves.left.and.right").foregroundStyle(ODTheme.warning) }
+                if packet.heardSelfViaSatellite { Label("Heard yourself via the satellite", systemImage: "checkmark.seal.fill").foregroundStyle(ODTheme.good) }
+            }
+            .font(.caption)
+        }
+    }
+
+    private var monitor: some View {
+        VStack(alignment: .leading, spacing: 6) {
+            HStack {
+                Text("Monitor").font(.caption.weight(.semibold)).foregroundStyle(ODTheme.muted)
+                Spacer()
+                if !packet.log.isEmpty { Button("Clear") { packet.clearLog() }.font(.caption).buttonStyle(.borderless) }
+            }
+            if packet.log.isEmpty {
+                Text("No packets yet. Frames heard on the downlink appear here.").font(.caption).foregroundStyle(ODTheme.muted)
+            } else {
+                ForEach(packet.log.suffix(25).reversed()) { entry in
+                    PacketLogRow(entry: entry) { call in messageTo = call }
+                }
+            }
+        }
+    }
+
+    private var compose: some View {
+        VStack(alignment: .leading, spacing: 8) {
+            HStack {
+                TextField("To", text: $messageTo)
+                    .textInputAutocapitalization(.characters).autocorrectionDisabled()
+                    .textFieldStyle(.odField).frame(width: 110)
+                TextField("Message", text: $messageText)
+                    .textFieldStyle(.odField)
+                    .onSubmit(sendMessage)
+                Button("Send", action: sendMessage)
+                    .buttonStyle(.borderedProminent)
+                    .disabled(messageTo.isEmpty || messageText.isEmpty || packet.isTransmitting)
+            }
+            HStack {
+                Button { packet.sendPosition() } label: { Label("Send position", systemImage: "location") }
+                    .buttonStyle(.bordered)
+                    .disabled(packet.isTransmitting)
+                Spacer()
+                Text("Tap a station to reply.").font(.caption2).foregroundStyle(ODTheme.muted)
+            }
+        }
+    }
+
+    private func sendMessage() {
+        packet.sendMessage(to: messageTo, text: messageText)
+        messageText = ""
+    }
+
+    @ViewBuilder private var setup: some View {
+        VStack(alignment: .leading, spacing: 10) {
+            Picker("Connection", selection: $packet.settings.transport) {
+                ForEach(PacketSettings.Transport.allCases) { Text($0.label).tag($0) }
+            }
+            .pickerStyle(.segmented)
+            .disabled(packet.isRunning)
+
+            if packet.settings.transport == .bleKISS {
+                Button { pickingAdapter = true } label: {
+                    HStack {
+                        Text("KISS adapter")
+                        Spacer()
+                        Text(packet.settings.bleName.isEmpty ? "Choose…" : packet.settings.bleName).foregroundStyle(ODTheme.muted)
+                    }
+                    .contentShape(Rectangle())
+                }
+                .buttonStyle(.plain)
+                .disabled(packet.isRunning)
+                Toggle("Tune the radio to the packet frequency (B.B. Link)", isOn: $packet.settings.bbLinkTune)
+                Text("Uses the radio's built-in TNC through a BLE KISS adapter. The Kenwood TH-D74/D75 only offer Bluetooth Classic, which iOS can't open, so they need the B.B. Link adapter (or a compatible ESP32/Raspberry Pi bridge). Set the radio's KISS interface to Bluetooth (menu 983). The adapter accepts one app at a time, so CAT control over the same adapter isn't available while packet runs.")
+                    .font(.caption).foregroundStyle(ODTheme.muted)
+            } else {
+                Stepper("TX delay: \(packet.settings.txDelayMs) ms", value: $packet.settings.txDelayMs, in: 50...1000, step: 50)
+                VStack(alignment: .leading, spacing: 3) {
+                    HStack {
+                        Text("TX audio level").font(.caption2.weight(.semibold)).foregroundStyle(ODTheme.muted)
+                        Spacer()
+                        Text(String(format: "%.0f%%", packet.settings.outputLevel * 100)).font(.caption2.monospacedDigit())
+                    }
+                    FineSlider(value: $packet.settings.outputLevel, range: 0.05...1, step: 0.05)
+                }
+                Text("1200-baud AFSK through your audio interface. OrbitDeck keys the radio over CAT when it can, otherwise use VOX. Set about 3 kHz deviation: start low and raise the level until the digipeated copy decodes. With CAT connected, split-VFO Doppler keeps the uplink on frequency and holds it steady while keyed.")
+                    .font(.caption).foregroundStyle(ODTheme.muted)
+            }
+            Stepper("SSID: -\(packet.settings.ssid)", value: $packet.settings.ssid, in: 0...15)
+            HStack {
+                Text("Path")
+                Spacer()
+                TextField("ARISS", text: $packet.settings.path)
+                    .textInputAutocapitalization(.characters).autocorrectionDisabled()
+                    .multilineTextAlignment(.trailing).textFieldStyle(.odField).frame(width: 160)
+            }
+            HStack {
+                Text("Position comment")
+                Spacer()
+                TextField("grid + via OrbitDeck", text: $packet.settings.beaconComment)
+                    .multilineTextAlignment(.trailing).textFieldStyle(.odField).frame(width: 180)
+            }
+            Toggle("Acknowledge messages to me", isOn: $packet.settings.autoAck)
+            Text("Satellite digipeaters (ISS, and most amateur birds) answer the path ARISS. Keep transmissions short and infrequent — the channel is shared by everyone in the footprint.")
+                .font(.caption).foregroundStyle(ODTheme.muted)
+        }
+    }
+}
+
+private struct PacketLogRow: View {
+    let entry: PacketLogEntry
+    let reply: (String) -> Void
+
+    private var color: Color {
+        if entry.direction == .sent { return .orange }
+        if entry.ownDigipeated { return .cyan }
+        if entry.toMe { return ODTheme.good }
+        return .primary
+    }
+
+    var body: some View {
+        Button { reply(entry.frame.source.description) } label: {
+            VStack(alignment: .leading, spacing: 2) {
+                HStack(spacing: 6) {
+                    Text(ODFormat.axisClock(entry.date)).font(.caption2.monospacedDigit()).foregroundStyle(ODTheme.muted)
+                    Text(entry.frame.source.description).font(.caption.weight(.semibold))
+                    if entry.direction == .sent { Text("TX").font(.caption2.weight(.bold)).foregroundStyle(.orange) }
+                    if entry.ownDigipeated { Image(systemName: "checkmark.seal.fill").font(.caption2).foregroundStyle(.cyan) }
+                    if entry.acked { Text("acked").font(.caption2).foregroundStyle(ODTheme.good) }
+                    Spacer()
+                    if let lat = entry.aprs.latitude, let lon = entry.aprs.longitude {
+                        Text(FeatureEngine.latLonToGrid6(latitude: lat, longitude: lon).prefix(4))
+                            .font(.caption2.monospacedDigit()).foregroundStyle(ODTheme.accent)
+                    }
+                }
+                Text(summary).font(.caption.monospaced()).foregroundStyle(color).lineLimit(3)
+            }
+            .contentShape(Rectangle())
+        }
+        .buttonStyle(.plain)
+    }
+
+    private var summary: String {
+        let a = entry.aprs
+        switch a.kind {
+        case .message: return "→ \(a.addressee): \(a.text)"
+        case .ack: return "ack \(a.messageID ?? "") → \(a.addressee)"
+        case .status: return "status: \(a.comment)"
+        case .position, .micE: return a.comment.isEmpty ? "position" : a.comment
+        default: return entry.frame.monitorText
+        }
+    }
+}

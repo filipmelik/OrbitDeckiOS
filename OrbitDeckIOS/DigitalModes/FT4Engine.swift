@@ -1159,3 +1159,1074 @@ final class PSKReporter {
         conn.start(queue: DispatchQueue.global(qos: .utility))
     }
 }
+
+// ###########################################################################
+//  PACKET / APRS (protocol, modem and engine)
+//
+//  Kept in this file (rather than its own) because new source files have to be
+//  added to the Xcode target by hand; this file is already in the target.
+// ###########################################################################
+
+// ===========================================================================
+//  AX25.swift — AX.25 UI framing, FCS, KISS and APRS (pure, testable)
+//
+//  Written from the public specifications: AX.25 Link Access Protocol v2.2,
+//  the KISS TNC protocol (Chepponis & Karn, 1987) and the APRS Protocol
+//  Reference 1.0.1 (+ the Mic-E chapter). OscarWatch (AGPL) was consulted only as
+//  a behavioural reference; no code was taken from it.
+// ===========================================================================
+
+// MARK: - FCS (CRC-16/X.25)
+
+enum AX25FCS {
+    /// CRC-16/X.25: reflected polynomial 0x8408, init 0xFFFF, final XOR 0xFFFF.
+    /// Sent low byte first after the frame. ("123456789" → 0x906E.)
+    nonisolated static func compute<S: Sequence>(_ bytes: S) -> UInt16 where S.Element == UInt8 {
+        var crc: UInt16 = 0xFFFF
+        for b in bytes {
+            crc ^= UInt16(b)
+            for _ in 0..<8 {
+                crc = (crc & 1) != 0 ? (crc >> 1) ^ 0x8408 : crc >> 1
+            }
+        }
+        return crc ^ 0xFFFF
+    }
+}
+
+// MARK: - Address
+
+/// One AX.25 address (callsign + SSID). `repeated` is the H bit on a digipeater
+/// field ("has been repeated", shown as `*`).
+struct AX25Address: Equatable, Hashable, Sendable, CustomStringConvertible {
+    var call: String
+    var ssid: Int
+    var repeated = false
+
+    init(call: String, ssid: Int = 0, repeated: Bool = false) {
+        self.call = String(call.uppercased().prefix(6))
+        self.ssid = max(0, min(15, ssid))
+        self.repeated = repeated
+    }
+
+    /// Parse "N8HM", "N8HM-7" or "WIDE2-1*".
+    init?(_ text: String) {
+        var t = text.trimmingCharacters(in: .whitespaces).uppercased()
+        var rep = false
+        if t.hasSuffix("*") { rep = true; t.removeLast() }
+        let parts = t.split(separator: "-", maxSplits: 1).map(String.init)
+        guard let call = parts.first, !call.isEmpty, call.count <= 6,
+              call.allSatisfy({ $0.isASCII && ($0.isLetter || $0.isNumber) }) else { return nil }
+        var ssid = 0
+        if parts.count == 2 {
+            guard let s = Int(parts[1]), (0...15).contains(s) else { return nil }
+            ssid = s
+        }
+        self.init(call: call, ssid: ssid, repeated: rep)
+    }
+
+    var description: String { ssid == 0 ? call : "\(call)-\(ssid)" }
+
+    /// 7-byte address field: callsign shifted left one bit, space padded; then the
+    /// SSID byte `C/H 1 1 S S S S last`.
+    nonisolated func encoded(last: Bool, highBit: Bool) -> [UInt8] {
+        var out = [UInt8](repeating: 0x40, count: 6)           // ' ' << 1
+        for (i, ch) in call.utf8.prefix(6).enumerated() { out[i] = ch << 1 }
+        var s: UInt8 = 0x60 | UInt8(ssid & 0x0F) << 1
+        if highBit { s |= 0x80 }
+        if last { s |= 0x01 }
+        out.append(s)
+        return out
+    }
+
+    nonisolated static func decode(_ b: ArraySlice<UInt8>) -> (address: AX25Address, highBit: Bool, last: Bool)? {
+        guard b.count >= 7 else { return nil }
+        let s = b.startIndex
+        var call = ""
+        for i in 0..<6 {
+            let c = b[s + i] >> 1
+            guard c >= 0x20, c < 0x7F else { return nil }
+            if c != 0x20 { call.append(Character(UnicodeScalar(c))) }
+        }
+        guard !call.isEmpty else { return nil }
+        let ssidByte = b[s + 6]
+        let high = ssidByte & 0x80 != 0
+        return (AX25Address(call: call, ssid: Int((ssidByte >> 1) & 0x0F), repeated: high), high, ssidByte & 0x01 != 0)
+    }
+}
+
+// MARK: - Frame
+
+/// An AX.25 frame (UI frames are what APRS and satellite digipeaters use).
+struct AX25Frame: Equatable, Sendable {
+    var destination: AX25Address
+    var source: AX25Address
+    var digipeaters: [AX25Address] = []
+    var control: UInt8 = 0x03          // UI
+    var pid: UInt8? = 0xF0             // no layer 3
+    var info: [UInt8] = []
+
+    var isUI: Bool { control & 0xEF == 0x03 }
+    var infoText: String { String(decoding: info, as: UTF8.self) }
+
+    /// Address + control + PID + info (no FCS). Destination carries the command C bit
+    /// (AX.25 v2 command frame); digipeaters carry their H bit.
+    nonisolated func encoded() -> [UInt8] {
+        var out: [UInt8] = []
+        out += destination.encoded(last: false, highBit: true)
+        out += source.encoded(last: digipeaters.isEmpty, highBit: false)
+        for (i, d) in digipeaters.enumerated() {
+            out += d.encoded(last: i == digipeaters.count - 1, highBit: d.repeated)
+        }
+        out.append(control)
+        if let pid { out.append(pid) }
+        out += info
+        return out
+    }
+
+    /// Parse address + control + PID + info (FCS already stripped).
+    nonisolated static func decode(_ bytes: [UInt8]) -> AX25Frame? {
+        guard bytes.count >= 15 else { return nil }
+        var addresses: [AX25Address] = []
+        var i = 0
+        while true {
+            guard i + 7 <= bytes.count, addresses.count < 10,
+                  let a = AX25Address.decode(bytes[i..<(i + 7)]) else { return nil }
+            addresses.append(a.address)
+            i += 7
+            if a.last { break }
+        }
+        guard addresses.count >= 2, i < bytes.count else { return nil }
+        let control = bytes[i]; i += 1
+        // I frames and UI frames carry a PID; S/U (other than UI) frames don't.
+        var pid: UInt8?
+        if control & 0x01 == 0 || control & 0xEF == 0x03 {
+            guard i < bytes.count else { return nil }
+            pid = bytes[i]; i += 1
+        }
+        var dest = addresses[0], src = addresses[1]
+        dest.repeated = false; src.repeated = false       // C bits, not "repeated"
+        return AX25Frame(destination: dest, source: src, digipeaters: Array(addresses.dropFirst(2)),
+                         control: control, pid: pid, info: Array(bytes[i...]))
+    }
+
+    /// TNC2 monitor format: `SRC>DST,DIGI1,DIGI2*:info`, the `*` on the last digipeater
+    /// that has repeated the frame.
+    var monitorText: String {
+        var path = [destination.description]
+        let lastRepeated = digipeaters.lastIndex { $0.repeated }
+        for (i, d) in digipeaters.enumerated() {
+            path.append(d.description + (i == lastRepeated ? "*" : ""))
+        }
+        let printable = String(info.map { (0x20..<0x7F).contains($0) || $0 >= 0x80 ? Character(UnicodeScalar($0)) : "." })
+        let text = String(data: Data(info), encoding: .utf8) ?? printable
+        return "\(source)>\(path.joined(separator: ",")):\(text.replacingOccurrences(of: "\r", with: " "))"
+    }
+
+    /// True when a digipeater has repeated this frame (it came back through the bird).
+    var wasDigipeated: Bool { digipeaters.contains { $0.repeated } }
+}
+
+// MARK: - KISS
+
+/// KISS TNC framing: `FEND <type> <escaped data> FEND`, type = port << 4 | command.
+enum KISS {
+    static let fend: UInt8 = 0xC0, fesc: UInt8 = 0xDB, tfend: UInt8 = 0xDC, tfesc: UInt8 = 0xDD
+
+    nonisolated static func encode(_ payload: [UInt8], port: UInt8 = 0, command: UInt8 = 0) -> [UInt8] {
+        var out: [UInt8] = [fend, (port & 0x0F) << 4 | (command & 0x0F)]
+        for b in payload {
+            switch b {
+            case fend: out += [fesc, tfend]
+            case fesc: out += [fesc, tfesc]
+            default: out.append(b)
+            }
+        }
+        out.append(fend)
+        return out
+    }
+
+    /// Streaming decoder: feed bytes as they arrive, get complete frames out.
+    struct Decoder {
+        private var buffer: [UInt8] = []
+        private var inFrame = false
+        private var escaped = false
+
+        init() {}
+
+        mutating func feed(_ bytes: [UInt8]) -> [(port: UInt8, command: UInt8, data: [UInt8])] {
+            var frames: [(UInt8, UInt8, [UInt8])] = []
+            for b in bytes {
+                if b == KISS.fend {
+                    if inFrame, let type = buffer.first {
+                        frames.append((type >> 4, type & 0x0F, Array(buffer.dropFirst())))
+                    }
+                    buffer.removeAll(keepingCapacity: true); inFrame = true; escaped = false
+                    continue
+                }
+                guard inFrame else { continue }
+                if escaped {
+                    buffer.append(b == KISS.tfend ? KISS.fend : (b == KISS.tfesc ? KISS.fesc : b))
+                    escaped = false
+                } else if b == KISS.fesc {
+                    escaped = true
+                } else {
+                    buffer.append(b)
+                }
+                if buffer.count > 1024 { buffer.removeAll(); inFrame = false }   // runaway guard
+            }
+            // An empty frame (FEND FEND) carries no type byte and is skipped above.
+            return frames.filter { !$0.2.isEmpty || $0.1 != 0 }.map { (port: $0.0, command: $0.1, data: $0.2) }
+        }
+    }
+}
+
+// MARK: - APRS
+
+/// A parsed APRS information field.
+struct APRSPacket: Equatable, Sendable {
+    enum Kind: String, Sendable { case position, message, ack, reject, status, micE, other }
+    var kind: Kind
+    var latitude: Double?
+    var longitude: Double?
+    var symbolTable: Character?
+    var symbolCode: Character?
+    var comment = ""
+    var addressee = ""
+    var text = ""
+    var messageID: String?
+}
+
+enum APRS {
+    /// Uncompressed position, no timestamp, messaging capable (`=`):
+    /// `=DDMM.mmN/DDDMM.mmW`code comment.
+    nonisolated static func position(latitude: Double, longitude: Double, symbolTable: Character = "/",
+                                     symbolCode: Character = "`", comment: String = "") -> String {
+        let lat = abs(latitude), lon = abs(longitude)
+        let latDeg = Int(lat), lonDeg = Int(lon)
+        let latMin = (lat - Double(latDeg)) * 60, lonMin = (lon - Double(lonDeg)) * 60
+        let latStr = String(format: "%02d%05.2f%@", latDeg, min(latMin, 59.99), latitude >= 0 ? "N" : "S")
+        let lonStr = String(format: "%03d%05.2f%@", lonDeg, min(lonMin, 59.99), longitude >= 0 ? "E" : "W")
+        return "=\(latStr)\(symbolTable)\(lonStr)\(symbolCode)\(comment)"
+    }
+
+    /// Message: `:ADDRESSEE:text{id` (addressee padded to 9, text ≤ 67 characters).
+    nonisolated static func message(to addressee: String, text: String, id: String? = nil) -> String {
+        let addr = String(addressee.uppercased().prefix(9)).padding(toLength: 9, withPad: " ", startingAt: 0)
+        // `{`, `|` and `~` are reserved in message text.
+        let clean = String(text.filter { $0 != "{" && $0 != "|" && $0 != "~" }.prefix(67))
+        return ":\(addr):\(clean)" + (id.map { "{\($0)" } ?? "")
+    }
+
+    nonisolated static func ack(to addressee: String, id: String) -> String {
+        let addr = String(addressee.uppercased().prefix(9)).padding(toLength: 9, withPad: " ", startingAt: 0)
+        return ":\(addr):ack\(id)"
+    }
+
+    nonisolated static func status(_ text: String) -> String { ">\(text.prefix(62))" }
+
+    /// Parse an information field. `destination` is needed for Mic-E (the latitude
+    /// rides in the destination callsign).
+    nonisolated static func parse(_ info: String, destination: String = "") -> APRSPacket {
+        guard let dti = info.first else { return APRSPacket(kind: .other) }
+        let body = Array(info.dropFirst())
+        switch dti {
+        case "!", "=":
+            return parsePosition(body) ?? APRSPacket(kind: .other, comment: info)
+        case "/", "@":
+            // 7-character timestamp, then a position.
+            guard body.count > 7 else { return APRSPacket(kind: .other, comment: info) }
+            return parsePosition(Array(body.dropFirst(7))) ?? APRSPacket(kind: .other, comment: info)
+        case ":":
+            return parseMessage(body) ?? APRSPacket(kind: .other, comment: info)
+        case ">":
+            return APRSPacket(kind: .status, comment: String(body))
+        case "`", "'":
+            return parseMicE(body, destination: destination) ?? APRSPacket(kind: .other, comment: info)
+        default:
+            return APRSPacket(kind: .other, comment: info)
+        }
+    }
+
+    private nonisolated static func parsePosition(_ c: [Character]) -> APRSPacket? {
+        // Uncompressed: DDMM.mmN T DDDMM.mmW C (19 characters).
+        if c.count >= 19, c[0].isNumber {
+            guard let lat = dm(String(c[0..<7]), degDigits: 2, hemi: c[7], pos: "N", neg: "S"),
+                  let lon = dm(String(c[9..<17]), degDigits: 3, hemi: c[17], pos: "E", neg: "W") else { return nil }
+            return APRSPacket(kind: .position, latitude: lat, longitude: lon, symbolTable: c[8],
+                              symbolCode: c[18], comment: String(c.dropFirst(19)))
+        }
+        // Compressed: T YYYY XXXX C cs T (13 characters, base-91).
+        if c.count >= 13 {
+            func b91(_ s: ArraySlice<Character>) -> Double? {
+                var v = 0
+                for ch in s {
+                    guard let a = ch.asciiValue, (33...124).contains(a) else { return nil }
+                    v = v * 91 + Int(a) - 33
+                }
+                return Double(v)
+            }
+            guard let y = b91(c[1..<5]), let x = b91(c[5..<9]) else { return nil }
+            return APRSPacket(kind: .position, latitude: 90 - y / 380926, longitude: -180 + x / 190463,
+                              symbolTable: c[0], symbolCode: c[9], comment: String(c.dropFirst(13)))
+        }
+        return nil
+    }
+
+    /// "DDMM.mm" + hemisphere → signed degrees (spaces = position ambiguity → 0).
+    private nonisolated static func dm(_ s: String, degDigits: Int, hemi: Character, pos: Character, neg: Character) -> Double? {
+        let t = s.replacingOccurrences(of: " ", with: "0")
+        guard t.count == degDigits + 5, let deg = Double(t.prefix(degDigits)), let min = Double(t.dropFirst(degDigits)),
+              hemi == pos || hemi == neg, min < 60 else { return nil }
+        let v = deg + min / 60
+        return hemi == neg ? -v : v
+    }
+
+    private nonisolated static func parseMessage(_ c: [Character]) -> APRSPacket? {
+        guard c.count >= 10, c[9] == ":" else { return nil }
+        let addressee = String(c[0..<9]).trimmingCharacters(in: .whitespaces)
+        var text = String(c.dropFirst(10))
+        if text.hasPrefix("ack") { return APRSPacket(kind: .ack, addressee: addressee, messageID: String(text.dropFirst(3))) }
+        if text.hasPrefix("rej") { return APRSPacket(kind: .reject, addressee: addressee, messageID: String(text.dropFirst(3))) }
+        var id: String?
+        if let brace = text.lastIndex(of: "{") {
+            // "{id" or the reply-ack form "{id}ackid".
+            let raw = text[text.index(after: brace)...]
+            id = String(raw.split(separator: "}").first ?? "")
+            text = String(text[..<brace])
+        }
+        return APRSPacket(kind: .message, addressee: addressee, text: text, messageID: (id?.isEmpty ?? true) ? nil : id)
+    }
+
+    /// Mic-E (APRS 1.0.1 ch. 10): latitude digits + N/S, longitude offset and E/W in
+    /// the destination callsign; longitude degrees/minutes in the info bytes.
+    private nonisolated static func parseMicE(_ c: [Character], destination: String) -> APRSPacket? {
+        let dest = Array(destination.uppercased().prefix(6))
+        guard dest.count == 6, c.count >= 8 else { return nil }
+        var digits: [Int] = []
+        for ch in dest {
+            switch ch {
+            case "0"..."9": digits.append(Int(String(ch))!)
+            case "A"..."J": digits.append(Int(ch.asciiValue! - 65))
+            case "P"..."Y": digits.append(Int(ch.asciiValue! - 80))
+            case "K", "L", "Z": digits.append(0)     // ambiguity / space
+            default: return nil
+            }
+        }
+        let north = ("P"..."Z").contains(dest[3])
+        let lonOffset = ("P"..."Z").contains(dest[4]) ? 100 : 0
+        let west = ("P"..."Z").contains(dest[5])
+        let latDeg = Double(digits[0] * 10 + digits[1])
+        let latMin = Double(digits[2] * 10 + digits[3]) + Double(digits[4] * 10 + digits[5]) / 100
+        var lat = latDeg + latMin / 60
+        if !north { lat = -lat }
+
+        func v(_ i: Int) -> Int? { c[i].asciiValue.map { Int($0) - 28 } }
+        guard var d = v(0), var m = v(1), let h = v(2) else { return nil }
+        d += lonOffset
+        if (180...189).contains(d) { d -= 80 } else if (190...199).contains(d) { d -= 190 }
+        if m >= 60 { m -= 60 }
+        var lon = Double(d) + (Double(m) + Double(h) / 100) / 60
+        if west { lon = -lon }
+        guard abs(lat) <= 90, abs(lon) <= 180 else { return nil }
+        return APRSPacket(kind: .micE, latitude: lat, longitude: lon, symbolTable: c[7], symbolCode: c[6],
+                          comment: String(c.dropFirst(8)))
+    }
+}
+
+// ===========================================================================
+//  AFSKModem.swift — Bell 202 1200-baud AFSK modem + HDLC (pure, testable)
+//
+//  The classic AX.25 packet physical layer: HDLC frames (0x7E flags, zero-bit
+//  stuffing, FCS) sent LSB first, NRZI encoded (a 0 bit toggles the tone, a 1 bit
+//  keeps it), as Bell 202 tones: mark 1200 Hz, space 2200 Hz, 1200 baud.
+//
+//  Receiver: one-bit-long quadrature correlators at mark and space give tone
+//  energies; a bank of slicers compares them with different space-tone weights
+//  (FM de-emphasis tilts the two tones by several dB depending on the radio, so a
+//  single fixed comparison misses frames), each with its own digital PLL clock
+//  recovery and HDLC decoder. Duplicate frames from the bank are dropped. Written
+//  from the Bell 202 / AX.25 specifications.
+// ===========================================================================
+
+// MARK: - HDLC
+
+enum HDLC {
+    /// Frame bytes (without FCS) → the NRZI tone sequence (true = mark) including
+    /// `preambleFlags` leading flags and `postambleFlags` trailing ones.
+    nonisolated static func encode(_ frame: [UInt8], preambleFlags: Int, postambleFlags: Int = 3) -> [Bool] {
+        let fcs = AX25FCS.compute(frame)
+        let body = frame + [UInt8(fcs & 0xFF), UInt8(fcs >> 8)]
+        var bits: [Bool] = []
+        bits.reserveCapacity((body.count + preambleFlags + postambleFlags) * 10)
+        func flag() { for i in 0..<8 { bits.append((0x7E >> i) & 1 == 1) } }
+        for _ in 0..<max(1, preambleFlags) { flag() }
+        var ones = 0
+        for byte in body {
+            for i in 0..<8 {
+                let bit = (byte >> i) & 1 == 1
+                bits.append(bit)
+                if bit {
+                    ones += 1
+                    if ones == 5 { bits.append(false); ones = 0 }   // zero-bit stuffing
+                } else {
+                    ones = 0
+                }
+            }
+        }
+        for _ in 0..<max(1, postambleFlags) { flag() }
+        // NRZI: 0 → change tone, 1 → keep.
+        var level = true
+        return bits.map { bit in
+            if !bit { level.toggle() }
+            return level
+        }
+    }
+
+    /// Streaming HDLC receiver: feed one demodulated tone decision per bit (true =
+    /// mark); complete frames with a good FCS come out without the FCS.
+    struct Decoder {
+        private var lastLevel = false
+        private var history: UInt32 = 0       // recent raw (NRZI-decoded) bits, newest in bit 0
+        private var collecting = false
+        private var byteAcc: UInt16 = 0x80
+        private var bytes: [UInt8] = []
+        /// True while inside a frame (after a flag, before abort/end) — used for DCD.
+        private(set) var inFrame = false
+
+        init() {}
+
+        mutating func push(level: Bool) -> [UInt8]? {
+            let bit: UInt32 = level == lastLevel ? 1 : 0
+            lastLevel = level
+            history = (history << 1) | bit
+            var out: [UInt8]?
+            if history & 0xFF == 0x7E {                    // flag 01111110
+                if collecting, bytes.count >= 17, Self.fcsOK(bytes) {
+                    out = Array(bytes.dropLast(2))
+                }
+                collecting = true; inFrame = true
+                bytes.removeAll(keepingCapacity: true); byteAcc = 0x80
+                return out
+            }
+            if history & 0x7F == 0x7F {                    // seven ones: abort / idle
+                collecting = false; inFrame = false
+                return nil
+            }
+            guard collecting else { return nil }
+            if history & 0x3F == 0x3E { return nil }       // stuffed zero after five ones
+            if bit == 1 { byteAcc |= 0x100 }
+            let complete = byteAcc & 1 == 1
+            byteAcc >>= 1
+            if complete {
+                bytes.append(UInt8(truncatingIfNeeded: byteAcc))
+                byteAcc = 0x80
+                if bytes.count > 400 { collecting = false; inFrame = false }   // runaway
+            }
+            return nil
+        }
+
+        private static func fcsOK(_ b: [UInt8]) -> Bool {
+            let n = b.count
+            let fcs = AX25FCS.compute(b[0..<(n - 2)])
+            return b[n - 2] == UInt8(fcs & 0xFF) && b[n - 1] == UInt8(fcs >> 8)
+        }
+    }
+}
+
+// MARK: - Modulator
+
+enum AFSKModulator {
+    static let markHz = 1200.0, spaceHz = 2200.0, baud = 1200.0
+
+    /// Phase-continuous Bell 202 audio for an NRZI tone sequence.
+    nonisolated static func modulate(_ tones: [Bool], sampleRate: Double, amplitude: Float = 0.5) -> [Float] {
+        let samplesPerBit = sampleRate / baud
+        var out: [Float] = []
+        out.reserveCapacity(Int(Double(tones.count) * samplesPerBit) + 2)
+        var phase = 0.0
+        var clock = 0.0
+        for tone in tones {
+            let step = 2 * Double.pi * (tone ? markHz : spaceHz) / sampleRate
+            clock += samplesPerBit
+            while clock >= 1 {
+                out.append(Float(sin(phase)) * amplitude)
+                phase += step
+                if phase > 2 * Double.pi { phase -= 2 * Double.pi }
+                clock -= 1
+            }
+        }
+        return out
+    }
+
+    /// A complete transmission: TX-delay flags, frame, tail flags, as audio.
+    nonisolated static func transmission(_ frame: AX25Frame, sampleRate: Double, txDelayMs: Int, amplitude: Float = 0.5) -> [Float] {
+        let flags = max(4, Int((Double(txDelayMs) / 1000 * baud / 8).rounded()))
+        return modulate(HDLC.encode(frame.encoded(), preambleFlags: flags), sampleRate: sampleRate, amplitude: amplitude)
+    }
+}
+
+// MARK: - Demodulator
+
+/// Streaming Bell 202 demodulator. Not thread-safe: feed it from one queue.
+final class AFSKDemodulator {
+    private let sampleRate: Double
+    private let window: Int
+    // Band-pass pre-filter (two biquads: 900 Hz high-pass, 2700 Hz low-pass).
+    private var hp = Biquad(), lp = Biquad()
+    // Quadrature correlators: rotating phasors and one-bit running sums.
+    private var markPhasor = (re: 1.0, im: 0.0), spacePhasor = (re: 1.0, im: 0.0)
+    private let markStep: (re: Double, im: Double)
+    private let spaceStep: (re: Double, im: Double)
+    private var ring: [(mi: Double, mq: Double, si: Double, sq: Double)]
+    private var ringIndex = 0
+    private var sum = (mi: 0.0, mq: 0.0, si: 0.0, sq: 0.0)
+    private var renorm = 0
+
+    private struct Slicer {
+        let spaceGain: Double
+        var pll = 0.0
+        var lastSign = false
+        var hdlc = HDLC.Decoder()
+    }
+    private var slicers: [Slicer]
+    private let pllStep: Double
+    private var recent: [(fcs: UInt16, at: Int)] = []
+    private var sampleCount = 0
+    private var lastInFrameSample = -1_000_000
+
+    /// Space-tone weights for the slicer bank (covers roughly −6…+6 dB of tilt).
+    static let defaultGains: [Double] = [0.5, 0.7, 1.0, 1.4, 2.0]
+
+    init(sampleRate: Double, spaceGains: [Double] = AFSKDemodulator.defaultGains) {
+        self.sampleRate = sampleRate
+        window = max(4, Int((sampleRate / 1200).rounded()))
+        ring = Array(repeating: (0, 0, 0, 0), count: window)
+        let wm = 2 * Double.pi * 1200 / sampleRate, ws = 2 * Double.pi * 2200 / sampleRate
+        markStep = (cos(wm), sin(wm)); spaceStep = (cos(ws), sin(ws))
+        pllStep = 1200 / sampleRate
+        slicers = spaceGains.map { Slicer(spaceGain: $0) }
+        hp = Biquad.highPass(fc: 900, fs: sampleRate)
+        lp = Biquad.lowPass(fc: 2700, fs: sampleRate)
+    }
+
+    /// True if a frame has been in progress within the last ~250 ms (carrier detect,
+    /// for half-duplex channel-busy checks).
+    var channelBusy: Bool { sampleCount - lastInFrameSample < Int(sampleRate * 0.25) }
+
+    /// Feed audio; returns frames (address…info, FCS checked and removed).
+    func process(_ samples: [Float]) -> [AX25Frame] {
+        var frames: [AX25Frame] = []
+        for s in samples {
+            sampleCount += 1
+            let x = lp.process(hp.process(Double(s)))
+
+            // Correlate against both tones over the last bit period.
+            let mi = x * markPhasor.re, mq = x * markPhasor.im
+            let si = x * spacePhasor.re, sq = x * spacePhasor.im
+            let old = ring[ringIndex]
+            ring[ringIndex] = (mi, mq, si, sq)
+            ringIndex = (ringIndex + 1) % window
+            sum.mi += mi - old.mi; sum.mq += mq - old.mq
+            sum.si += si - old.si; sum.sq += sq - old.sq
+            markPhasor = rotate(markPhasor, markStep)
+            spacePhasor = rotate(spacePhasor, spaceStep)
+            renorm += 1
+            if renorm >= 512 {
+                renorm = 0
+                markPhasor = normalize(markPhasor); spacePhasor = normalize(spacePhasor)
+                // Rebuild the running sums occasionally to stop floating-point drift.
+                sum = ring.reduce(into: (0.0, 0.0, 0.0, 0.0)) { $0.0 += $1.mi; $0.1 += $1.mq; $0.2 += $1.si; $0.3 += $1.sq }
+            }
+            let markE = sum.mi * sum.mi + sum.mq * sum.mq
+            let spaceE = sum.si * sum.si + sum.sq * sum.sq
+
+            var anyInFrame = false
+            for k in slicers.indices {
+                let mark = markE > spaceE * slicers[k].spaceGain * slicers[k].spaceGain
+                // Digital PLL: sample each bit when the phase wraps; nudge the phase so
+                // tone transitions fall halfway between samples.
+                if mark != slicers[k].lastSign {
+                    slicers[k].lastSign = mark
+                    let p = slicers[k].pll
+                    slicers[k].pll += (0.5 - p) * (slicers[k].hdlc.inFrame ? 0.15 : 0.4)
+                }
+                slicers[k].pll += pllStep
+                if slicers[k].pll >= 1 {
+                    slicers[k].pll -= 1
+                    if let bytes = slicers[k].hdlc.push(level: mark), let frame = AX25Frame.decode(bytes) {
+                        let fcs = AX25FCS.compute(bytes)
+                        recent.removeAll { sampleCount - $0.at > Int(sampleRate) }
+                        if !recent.contains(where: { $0.fcs == fcs }) {
+                            recent.append((fcs, sampleCount))
+                            frames.append(frame)
+                        }
+                    }
+                }
+                if slicers[k].hdlc.inFrame { anyInFrame = true }
+            }
+            if anyInFrame { lastInFrameSample = sampleCount }
+        }
+        return frames
+    }
+
+    private func rotate(_ a: (re: Double, im: Double), _ b: (re: Double, im: Double)) -> (re: Double, im: Double) {
+        (a.re * b.re - a.im * b.im, a.re * b.im + a.im * b.re)
+    }
+    private func normalize(_ a: (re: Double, im: Double)) -> (re: Double, im: Double) {
+        let m = (a.re * a.re + a.im * a.im).squareRoot()
+        return m > 0 ? (a.re / m, a.im / m) : (1, 0)
+    }
+}
+
+/// Direct-form-I biquad (RBJ cookbook coefficients).
+struct Biquad {
+    var b0 = 1.0, b1 = 0.0, b2 = 0.0, a1 = 0.0, a2 = 0.0
+    private var x1 = 0.0, x2 = 0.0, y1 = 0.0, y2 = 0.0
+
+    static func highPass(fc: Double, fs: Double, q: Double = 0.707) -> Biquad {
+        let w = 2 * Double.pi * fc / fs, alpha = sin(w) / (2 * q), c = cos(w), a0 = 1 + alpha
+        var f = Biquad()
+        f.b0 = (1 + c) / 2 / a0; f.b1 = -(1 + c) / a0; f.b2 = (1 + c) / 2 / a0
+        f.a1 = -2 * c / a0; f.a2 = (1 - alpha) / a0
+        return f
+    }
+    static func lowPass(fc: Double, fs: Double, q: Double = 0.707) -> Biquad {
+        let w = 2 * Double.pi * min(fc, fs * 0.45) / fs, alpha = sin(w) / (2 * q), c = cos(w), a0 = 1 + alpha
+        var f = Biquad()
+        f.b0 = (1 - c) / 2 / a0; f.b1 = (1 - c) / a0; f.b2 = (1 - c) / 2 / a0
+        f.a1 = -2 * c / a0; f.a2 = (1 - alpha) / a0
+        return f
+    }
+    mutating func process(_ x: Double) -> Double {
+        let y = b0 * x + b1 * x1 + b2 * x2 - a1 * y1 - a2 * y2
+        x2 = x1; x1 = x; y2 = y1; y1 = y
+        return y
+    }
+}
+
+// ===========================================================================
+//  PacketEngine.swift — AX.25 / APRS packet terminal for satellite digipeaters
+//
+//  Two ways to reach the radio:
+//   • Built-in modem: Bell 202 AFSK 1200 over the shared AudioHub capture (USB
+//     interface, Icom network audio, or the phone mic as a last resort), keyed by
+//     CAT PTT when the radio supports it (VOX otherwise). Half duplex by default:
+//     it waits for a clear channel before keying.
+//   • KISS TNC over BLE: the BLE KISS TNC API (hessu/aprs-specs), as exposed by the
+//     B.B. Link adapter for the Kenwood TH-D74/D75's built-in TNC (the radio itself
+//     only speaks Bluetooth Classic, which iOS apps can't open).
+//
+//  CAT Doppler keeps running underneath: in split-VFO / same-band-hold mode the
+//  rig controller holds uplink writes while keyed, so frames go out on frequency.
+// ===========================================================================
+
+struct PacketSettings: Codable, Equatable, Sendable {
+    enum Transport: String, Codable, CaseIterable, Identifiable, Sendable {
+        case builtInModem, bleKISS
+        var id: String { rawValue }
+        var label: String { self == .builtInModem ? "Built-in modem" : "BLE KISS TNC" }
+    }
+    var transport: Transport = .builtInModem
+    var ssid = 6                    // -6 is the common SSID for satellite operation
+    var path = "ARISS"              // ISS and most amateur digipeating satellites answer ARISS
+    var txDelayMs = 300
+    var symbolTable = "/"
+    var symbolCode = "`"            // primary table "`" = dish antenna
+    var beaconComment = ""
+    var autoAck = true
+    var bleIdentifier = ""
+    var bleName = ""
+    /// B.B. Link only: let OrbitDeck put the radio on the satellite's packet frequency.
+    var bbLinkTune = true
+    var outputLevel: Float = 0.5
+    var inputGain: Float = 1
+
+    init() {}
+    init(from decoder: Decoder) throws {
+        let c = try decoder.container(keyedBy: CodingKeys.self)
+        let d = PacketSettings()
+        func v<T: Decodable>(_ k: CodingKeys, _ def: T) -> T { ((try? c.decodeIfPresent(T.self, forKey: k)) ?? nil) ?? def }
+        transport = v(.transport, d.transport); ssid = v(.ssid, d.ssid); path = v(.path, d.path)
+        txDelayMs = v(.txDelayMs, d.txDelayMs); symbolTable = v(.symbolTable, d.symbolTable)
+        symbolCode = v(.symbolCode, d.symbolCode); beaconComment = v(.beaconComment, d.beaconComment)
+        autoAck = v(.autoAck, d.autoAck); bleIdentifier = v(.bleIdentifier, d.bleIdentifier)
+        bleName = v(.bleName, d.bleName); bbLinkTune = v(.bbLinkTune, d.bbLinkTune)
+        outputLevel = v(.outputLevel, d.outputLevel); inputGain = v(.inputGain, d.inputGain)
+    }
+}
+
+struct PacketLogEntry: Identifiable, Sendable {
+    enum Direction: Sendable { case received, sent }
+    let id = UUID()
+    let date: Date
+    let direction: Direction
+    let frame: AX25Frame
+    let aprs: APRSPacket
+    /// Our own frame heard back after a digipeater repeated it.
+    var ownDigipeated = false
+    /// A message addressed to us.
+    var toMe = false
+    var acked = false
+}
+
+@MainActor
+final class PacketEngine: ObservableObject {
+    static let settingsKey = "orbitdeck.packet"
+    /// APRS "tocall" for experimental software (APZ…).
+    static let tocall = "APZODK"
+    static let maxLog = 200
+
+    @Published var settings: PacketSettings { didSet { if settings != oldValue { save() } } }
+    @Published private(set) var isRunning = false
+    @Published private(set) var isTransmitting = false
+    @Published private(set) var status = "Idle"
+    @Published var errorText = ""
+    @Published private(set) var log: [PacketLogEntry] = []
+    @Published private(set) var channelBusy = false
+    @Published private(set) var rxLevel: Float = 0
+    @Published private(set) var heardSelfViaSatellite = false
+
+    private weak var rig: RigController?
+    private weak var audio: AudioHub?
+    private weak var store: OrbitStore?
+    private weak var qso: QSOStore?
+
+    // Built-in modem
+    private var source: AudioSource?
+    private let demodQueue = DispatchQueue(label: "org.orbitdeck.packet.demod")
+    private nonisolated(unsafe) var demod: AFSKDemodulator?
+    private nonisolated(unsafe) var peak: Float = 0
+    private let txLock = NSLock()
+    private nonisolated(unsafe) var txBuffer: [Float] = []
+    private nonisolated(unsafe) var txIndex = 0
+    private var meterTimer: DispatchSourceTimer?
+
+    // BLE KISS
+    private var kissLink: BLESerialTransport?
+    private var kissDecoder = KISS.Decoder()
+    private var kissReader: Task<Void, Never>?
+    private var tunedForSatellite: UInt?
+
+    private var txQueue: [AX25Frame] = []
+    private var txRunning = false
+    private var messageNumber = Int.random(in: 1...99)
+    private var pendingAcks: [String: UUID] = [:]   // message id → log entry
+
+    init() {
+        if let data = UserDefaults.standard.data(forKey: Self.settingsKey),
+           let s = try? JSONDecoder().decode(PacketSettings.self, from: data) {
+            settings = s
+        } else {
+            settings = PacketSettings()
+        }
+    }
+
+    func attach(rig: RigController, audio: AudioHub, store: OrbitStore, qso: QSOStore) {
+        self.rig = rig; self.audio = audio; self.store = store; self.qso = qso
+    }
+
+    private func save() {
+        if let data = try? JSONEncoder().encode(settings) { UserDefaults.standard.set(data, forKey: Self.settingsKey) }
+    }
+
+    /// The operator's callsign (station setup in the log, else Settings).
+    var myCall: String {
+        let fromLog = qso?.config.myCall.trimmingCharacters(in: .whitespaces) ?? ""
+        if !fromLog.isEmpty { return fromLog.uppercased() }
+        return (store?.preferences.callsign ?? "").trimmingCharacters(in: .whitespaces).uppercased()
+    }
+    var myAddress: AX25Address? {
+        guard let base = AX25Address(myCall.split(separator: "-").first.map(String.init) ?? "") else { return nil }
+        return AX25Address(call: base.call, ssid: settings.ssid)
+    }
+
+    /// A transponder suited to packet on this satellite (AFSK/APRS/packet digipeater),
+    /// else whatever CAT is tracking.
+    func packetTransponder(for sat: SatelliteRecord) -> TransponderRecord? {
+        let packetWords = ["APRS", "AFSK", "PACKET", "DIGI", "AX.25", "AX25"]
+        let packetish = sat.transponders.filter { tp in
+            let h = "\(tp.mode) \(tp.description)".uppercased()
+            return tp.isActive && packetWords.contains { h.contains($0) } && (tp.baud == 0 || tp.baud <= 1200)
+        }
+        return packetish.first { $0.isTwoWay } ?? packetish.first ?? rig?.transponder(for: sat)
+    }
+
+    // MARK: Start / stop
+
+    func start(satellite: SatelliteRecord?) {
+        guard !isRunning else { return }
+        errorText = ""
+        guard myAddress != nil else { errorText = "Set your callsign in Settings first."; return }
+        guard AudioActivity.claimMode("Packet") else {
+            errorText = "Audio is in use by \(AudioActivity.modeHolder ?? "another feature"). Stop it first."
+            return
+        }
+        heardSelfViaSatellite = false
+        switch settings.transport {
+        case .builtInModem: startModem()
+        case .bleKISS: startKISS(satellite: satellite)
+        }
+        if !isRunning { AudioActivity.releaseMode("Packet") }
+    }
+
+    func stop() {
+        guard isRunning else { return }
+        txQueue.removeAll()
+        meterTimer?.cancel(); meterTimer = nil
+        if let source {
+            source.stopPlayback(); source.stop()
+            if isTransmitting { Task { await rig?.setPTT(false) } }
+        }
+        source = nil
+        demodQueue.sync { demod = nil }
+        kissReader?.cancel(); kissReader = nil
+        if let link = kissLink {
+            let restore = settings.bbLinkTune && tunedForSatellite != nil
+            Task {
+                if restore { try? await link.send(KISS.encode([0xEB], command: 0x06)) }   // B.B. Link: restore frequency
+                await link.disconnect()
+            }
+        }
+        kissLink = nil; tunedForSatellite = nil
+        isTransmitting = false; isRunning = false; channelBusy = false; rxLevel = 0
+        status = "Idle"
+        AudioActivity.end()
+        AudioActivity.releaseMode("Packet")
+    }
+
+    private func startModem() {
+        guard let audio, let src = audio.makeSource(allowMicFallback: true) else {
+            errorText = "No audio input. Connect a USB audio interface or an Icom network radio."
+            return
+        }
+        src.inputGain = settings.inputGain
+        src.outputGain = 1
+        src.onError = { [weak self] m in Task { @MainActor in self?.errorText = m } }
+        do {
+            try src.start(onFrames: { [weak self] frames in self?.ingest(frames) })
+        } catch {
+            errorText = error.localizedDescription
+            return
+        }
+        source = src
+        let rate = src.sampleRate
+        demodQueue.sync { demod = AFSKDemodulator(sampleRate: rate) }
+        isRunning = true
+        AudioActivity.begin()
+        status = (rig?.pttSupported ?? false) ? "Listening — CAT PTT" : "Listening — key by VOX"
+        startMeter()
+    }
+
+    private nonisolated func ingest(_ frames: [Float]) {
+        let p = frames.reduce(Float(0)) { max($0, abs($1)) }
+        demodQueue.async { [weak self] in
+            guard let self, let demod = self.demod else { return }
+            if p > self.peak { self.peak = p }
+            let decoded = demod.process(frames)
+            let busy = demod.channelBusy
+            // Hop to the main actor only when something changed: a Task per audio buffer
+            // (~100/s) would flood it (the FT4 engine hit exactly that).
+            guard !decoded.isEmpty || busy != self.lastBusy else { return }
+            self.lastBusy = busy
+            Task { @MainActor in
+                if self.channelBusy != busy { self.channelBusy = busy }
+                for f in decoded { self.received(f) }
+            }
+        }
+    }
+    private nonisolated(unsafe) var lastBusy = false   // demodQueue only
+
+    private func startMeter() {
+        let t = DispatchSource.makeTimerSource(queue: .main)
+        t.schedule(deadline: .now() + 0.1, repeating: 0.1)
+        t.setEventHandler { [weak self] in
+            guard let self else { return }
+            let p = self.demodQueue.sync { () -> Float in let v = self.peak; self.peak = 0; return v }
+            self.rxLevel = max(p, self.rxLevel * 0.75)
+        }
+        t.resume()
+        meterTimer = t
+    }
+
+    private func startKISS(satellite: SatelliteRecord?) {
+        guard let uuid = UUID(uuidString: settings.bleIdentifier) else {
+            errorText = "Choose the BLE KISS adapter (e.g. B.B. Link) in Setup."
+            return
+        }
+        let link = BLESerialTransport(identifier: uuid, binding: .bleKISS)
+        link.onDisconnect = { [weak self] in
+            Task { @MainActor in
+                guard let self, self.isRunning else { return }
+                self.errorText = "The KISS adapter disconnected."
+                self.stop()
+            }
+        }
+        kissLink = link
+        isRunning = true
+        AudioActivity.begin()
+        status = "Connecting to \(settings.bleName.isEmpty ? "adapter" : settings.bleName)…"
+        Task {
+            do {
+                try await link.connect()
+            } catch {
+                errorText = "Couldn't connect to the KISS adapter: \(error.localizedDescription)"
+                stop()
+                return
+            }
+            status = "Connected — radio TNC (KISS)"
+            await tuneBBLink(for: satellite)
+            // Runs until stop() cancels it (that also releases its hold on self).
+            kissReader = Task {
+                while !Task.isCancelled {
+                    let bytes = await link.readAvailable(maxWait: 0.5)
+                    guard !bytes.isEmpty else { continue }
+                    for f in self.kissDecoder.feed(bytes) where f.command == 0 {
+                        if let frame = AX25Frame.decode(f.data) { self.received(frame) }
+                    }
+                }
+            }
+        }
+    }
+
+    /// B.B. Link extended hardware command: set the radio's frequency (KISS command 6,
+    /// `EA` + 32-bit big-endian Hz). The adapter leaves KISS, sets FM + frequency on the
+    /// data VFO and re-enters KISS, so this is for occasional moves only.
+    func tuneBBLink(for satellite: SatelliteRecord?) async {
+        guard settings.transport == .bleKISS, settings.bbLinkTune, let link = kissLink, let satellite,
+              tunedForSatellite != satellite.id, let tp = packetTransponder(for: satellite) else { return }
+        let hz = UInt32(clamping: tp.downlinkCenter)
+        guard hz > 0 else { return }
+        let cmd: [UInt8] = [0xEA, UInt8(hz >> 24), UInt8((hz >> 16) & 0xFF), UInt8((hz >> 8) & 0xFF), UInt8(hz & 0xFF)]
+        try? await link.send(KISS.encode(cmd, command: 0x06))
+        tunedForSatellite = satellite.id
+        status = "Connected — radio on \(ODFormat.frequency(tp.downlinkCenter))"
+    }
+
+    // MARK: Receive
+
+    private func received(_ frame: AX25Frame) {
+        let aprs = APRS.parse(frame.infoText, destination: frame.destination.call)
+        var entry = PacketLogEntry(date: Date(), direction: .received, frame: frame, aprs: aprs)
+        if let me = myAddress {
+            if frame.source == me {
+                entry.ownDigipeated = frame.wasDigipeated
+                if frame.wasDigipeated { heardSelfViaSatellite = true }
+            }
+            let to = aprs.addressee.uppercased()
+            if (aprs.kind == .message || aprs.kind == .ack || aprs.kind == .reject),
+               to == me.description || to == me.call {
+                entry.toMe = true
+                if aprs.kind == .ack, let id = aprs.messageID, let logID = pendingAcks.removeValue(forKey: id),
+                   let i = log.firstIndex(where: { $0.id == logID }) {
+                    log[i].acked = true
+                }
+                if aprs.kind == .message, settings.autoAck, let id = aprs.messageID {
+                    send(info: APRS.ack(to: frame.source.description, id: id))
+                }
+            }
+        }
+        append(entry)
+    }
+
+    private func append(_ entry: PacketLogEntry) {
+        log.append(entry)
+        if log.count > Self.maxLog { log.removeFirst(log.count - Self.maxLog) }
+    }
+
+    func clearLog() { log.removeAll() }
+
+    // MARK: Transmit
+
+    func sendPosition() {
+        guard let store else { return }
+        let o = store.preferences.observer
+        var comment = settings.beaconComment.trimmingCharacters(in: .whitespaces)
+        if comment.isEmpty { comment = store.operatorGrid6.prefix(4) + " via OrbitDeck" }
+        send(info: APRS.position(latitude: o.latitude, longitude: o.longitude,
+                                 symbolTable: settings.symbolTable.first ?? "/",
+                                 symbolCode: settings.symbolCode.first ?? "`", comment: comment))
+    }
+
+    func sendMessage(to: String, text: String) {
+        let addressee = to.trimmingCharacters(in: .whitespaces).uppercased()
+        guard !addressee.isEmpty, !text.isEmpty else { return }
+        messageNumber = messageNumber % 99 + 1
+        let id = String(messageNumber)
+        if let logID = send(info: APRS.message(to: addressee, text: text, id: id)) { pendingAcks[id] = logID }
+    }
+
+    func sendStatus(_ text: String) { send(info: APRS.status(text)) }
+
+    /// Queue a UI frame with this info field. Returns the log entry's id.
+    @discardableResult
+    func send(info: String) -> UUID? {
+        guard isRunning, let me = myAddress else { return nil }
+        let digis = settings.path.split(separator: ",").compactMap { AX25Address(String($0)) }.prefix(2)
+        let frame = AX25Frame(destination: AX25Address(call: Self.tocall), source: me,
+                              digipeaters: Array(digis), info: Array(info.utf8))
+        let entry = PacketLogEntry(date: Date(), direction: .sent, frame: frame,
+                                   aprs: APRS.parse(info, destination: Self.tocall))
+        append(entry)
+        txQueue.append(frame)
+        runTXQueue()
+        return entry.id
+    }
+
+    private func runTXQueue() {
+        guard !txRunning else { return }
+        txRunning = true
+        Task {
+            while let frame = txQueue.first, isRunning {
+                txQueue.removeFirst()
+                switch settings.transport {
+                case .bleKISS: await sendKISS(frame)
+                case .builtInModem: await sendModem(frame)
+                }
+            }
+            txRunning = false
+        }
+    }
+
+    private func sendKISS(_ frame: AX25Frame) async {
+        guard let link = kissLink else { return }
+        do { try await link.send(KISS.encode(frame.encoded())) }
+        catch { errorText = "Send failed: \(error.localizedDescription)" }
+    }
+
+    private func sendModem(_ frame: AX25Frame) async {
+        guard let source else { return }
+        // Half-duplex courtesy: wait (up to 3 s) for the channel to clear.
+        var waited = 0
+        while channelBusy, waited < 3000 { try? await Task.sleep(nanoseconds: 100_000_000); waited += 100 }
+        let audioOut = AFSKModulator.transmission(frame, sampleRate: source.sampleRate,
+                                                  txDelayMs: settings.txDelayMs, amplitude: settings.outputLevel)
+        txLock.withLock { txBuffer = audioOut; txIndex = 0 }
+        isTransmitting = true
+        status = "Transmitting…"
+        let keyed = rig?.pttSupported ?? false
+        if keyed { await rig?.setPTT(true) }
+        do {
+            try source.startPlayback(pull: { [weak self] n in self?.pullTX(n) ?? [] })
+        } catch {
+            errorText = error.localizedDescription
+        }
+        let seconds = Double(audioOut.count) / source.sampleRate + 0.15
+        try? await Task.sleep(nanoseconds: UInt64(seconds * 1_000_000_000))
+        source.stopPlayback()
+        if keyed { await rig?.setPTT(false) }
+        isTransmitting = false
+        status = keyed ? "Listening — CAT PTT" : "Listening — key by VOX"
+        // Let the receiver settle before the next frame.
+        try? await Task.sleep(nanoseconds: 300_000_000)
+    }
+
+    private nonisolated func pullTX(_ n: Int) -> [Float] {
+        txLock.lock(); defer { txLock.unlock() }
+        let remaining = txBuffer.count - txIndex
+        guard remaining > 0 else { return [] }
+        let k = min(n, remaining)
+        let out = Array(txBuffer[txIndex..<(txIndex + k)])
+        txIndex += k
+        return out
+    }
+}

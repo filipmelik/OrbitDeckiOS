@@ -59,6 +59,21 @@ final class BLESerialTransport: NSObject, CATTransport, @unchecked Sendable {
     static var nusRX: CBUUID { CBUUID(string: "6E400002-B5A3-F393-E0A9-E50E24DCCA9E") }  // write
     static var nusTX: CBUUID { CBUUID(string: "6E400003-B5A3-F393-E0A9-E50E24DCCA9E") }  // notify
 
+    /// A specific GATT service to bind to, by UUID string: write + notify
+    /// characteristics. The BLE KISS TNC API (hessu/aprs-specs BLE-KISS-API.md, used
+    /// by the B.B. Link for the TH-D74/D75) is service 00000001-…, app→TNC write
+    /// 00000002-…, TNC→app notify 00000003-… (all -ba2a-46c9-ae49-01b0961f68bb).
+    struct GATTBinding: Sendable {
+        let service: String
+        let write: String
+        let notify: String
+        static let bleKISS = GATTBinding(service: "00000001-BA2A-46C9-AE49-01B0961F68BB",
+                                         write: "00000002-BA2A-46C9-AE49-01B0961F68BB",
+                                         notify: "00000003-BA2A-46C9-AE49-01B0961F68BB")
+    }
+    /// nil = the CAT behaviour: prefer NUS, else the first write/notify pair found.
+    private let binding: GATTBinding?
+
     private let identifier: UUID
     private let queue = DispatchQueue(label: "org.orbitdeck.cat.ble")
     private var central: CBCentralManager!
@@ -79,8 +94,9 @@ final class BLESerialTransport: NSObject, CATTransport, @unchecked Sendable {
 
     var isConnected: Bool { lock.lock(); defer { lock.unlock() }; return connected }
 
-    init(identifier: UUID) {
+    init(identifier: UUID, binding: GATTBinding? = nil) {
         self.identifier = identifier
+        self.binding = binding
         super.init()
         central = CBCentralManager(delegate: self, queue: queue)
     }
@@ -149,8 +165,9 @@ final class BLESerialTransport: NSObject, CATTransport, @unchecked Sendable {
     func send(_ bytes: [UInt8]) async throws {
         guard isConnected, let p = peripheral, let ch = writeChar else { throw CATError.notConnected }
         let type: CBCharacteristicWriteType = ch.properties.contains(.writeWithoutResponse) ? .withoutResponse : .withResponse
-        // Chunk to a conservative MTU so large ASCII commands still get through.
-        let chunk = 180
+        // Chunk to the link's real maximum write (a write longer than it is silently
+        // dropped without response), capped at a conservative 180 bytes.
+        let chunk = max(20, min(180, p.maximumWriteValueLength(for: type)))
         var i = 0
         while i < bytes.count {
             let slice = Array(bytes[i..<min(i + chunk, bytes.count)])
@@ -201,7 +218,7 @@ extension BLESerialTransport: CBCentralManagerDelegate, CBPeripheralDelegate {
     }
 
     func centralManager(_ central: CBCentralManager, didConnect peripheral: CBPeripheral) {
-        peripheral.discoverServices(nil)
+        peripheral.discoverServices(binding.map { [CBUUID(string: $0.service)] })
     }
 
     func centralManager(_ central: CBCentralManager, didFailToConnect peripheral: CBPeripheral, error: Error?) {
@@ -226,6 +243,17 @@ extension BLESerialTransport: CBCentralManagerDelegate, CBPeripheralDelegate {
 
     func peripheral(_ peripheral: CBPeripheral, didDiscoverCharacteristicsFor service: CBService, error: Error?) {
         guard let chars = service.characteristics else { return }
+        if let binding {
+            // Bound service: take exactly its characteristics, nothing else (an adapter's
+            // OTA or config service must never receive packet data).
+            guard service.uuid == CBUUID(string: binding.service) else { return }
+            for c in chars {
+                if c.uuid == CBUUID(string: binding.write) { writeChar = c }
+                if c.uuid == CBUUID(string: binding.notify) { notifyChar = c; peripheral.setNotifyValue(true, for: c) }
+            }
+            if writeChar != nil, notifyChar != nil { finishConnect(.success(())) }
+            return
+        }
         for c in chars {
             if c.uuid == Self.nusRX || (writeChar == nil && (c.properties.contains(.write) || c.properties.contains(.writeWithoutResponse))) {
                 // Prefer the NUS write characteristic if present.

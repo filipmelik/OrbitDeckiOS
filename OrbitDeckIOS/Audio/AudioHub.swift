@@ -65,6 +65,7 @@ enum FeatureVisibility: String, CaseIterable, Identifiable {
     static let sstvKey = "feature.sstv"
     static let ft4Key = "feature.ft4"
     static let remoteAudioKey = "feature.remoteaudio"
+    static let packetKey = "feature.packet"
 }
 
 @MainActor

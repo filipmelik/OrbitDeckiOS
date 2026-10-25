@@ -184,6 +184,7 @@ struct HomeView: View {
                     HomeRecordingCard(satellite: satellite)
                     HomeSSTVCard(satellite: satellite)
                     HomeFT4Card(satellite: satellite)
+                    HomePacketCard(satellite: satellite)
                     HomeAmsatQuickReport(satellite: satellite)
                 }
 

@@ -13,6 +13,7 @@ struct OrbitDeckIOSApp: App {
     @StateObject private var ft4 = FT4Engine()
     @StateObject private var voice = RemoteVoiceController()
     @StateObject private var autoSwitch = AutoSwitchController()
+    @StateObject private var packet = PacketEngine()
 
     var body: some Scene {
         WindowGroup {
@@ -28,6 +29,7 @@ struct OrbitDeckIOSApp: App {
                 .environmentObject(ft4)
                 .environmentObject(voice)
                 .environmentObject(autoSwitch)
+                .environmentObject(packet)
                 .preferredColorScheme(.dark)
                 .task {
                     notifications.activate()
@@ -39,6 +41,7 @@ struct OrbitDeckIOSApp: App {
                     sstv.attach(qsoLog)
                     ft4.attach(rig: rig, qso: qsoLog)
                     voice.attach(rig: rig, hub: audio)
+                    packet.attach(rig: rig, audio: audio, store: store, qso: qsoLog)
                     await store.bootstrap()
                     // After bootstrap so the first tick sees the loaded catalog/selection.
                     autoSwitch.attach(store)
