@@ -612,8 +612,12 @@ final class OrbitStore: ObservableObject {
         for item in second { byID[item.id] = item }
         return byID.values.sorted {
             // Two-way transponders (uplink + downlink) come first, then alphabetical.
+            // The ID tie-break keeps same-named transponders in a fixed order;
+            // dictionary iteration order varies, which reshuffled picker menus.
             if $0.isTwoWay != $1.isTwoWay { return $0.isTwoWay }
-            return $0.description.localizedCaseInsensitiveCompare($1.description) == .orderedAscending
+            let byName = $0.description.localizedCaseInsensitiveCompare($1.description)
+            if byName != .orderedSame { return byName == .orderedAscending }
+            return $0.id < $1.id
         }
     }
 

@@ -288,15 +288,8 @@ private struct DXDopplerSheet: View {
                 VStack(spacing: 14) {
                     SectionCard("Setup") {
                         if satellite.transponders.count > 1 {
-                            Picker("Transponder", selection: Binding(
-                                get: { selectedTransponderID ?? satellite.transponders.first?.id },
-                                set: { selectedTransponderID = $0 }
-                            )) {
-                                ForEach(satellite.transponders) { tp in
-                                    Text(tp.description.isEmpty ? tp.kind : tp.description).tag(Optional(tp.id))
-                                }
-                            }
-                            .pickerStyle(.menu)
+                            TransponderPicker(transponders: satellite.transponders, selection: $selectedTransponderID)
+                                .equatable()
                         }
                         Picker("Mode", selection: $mode) {
                             ForEach(DXDopplerMode.allCases) { Text($0.label).tag($0) }

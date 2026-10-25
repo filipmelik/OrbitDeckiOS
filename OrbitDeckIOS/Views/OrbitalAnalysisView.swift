@@ -140,15 +140,8 @@ struct OrbitalAnalysisView: View {
             SectionCard("Live Doppler") {
                 if let transponder = selectedTransponder(satellite), let look {
                     if satellite.transponders.count > 1 {
-                        Picker("Transponder", selection: Binding(
-                            get: { selectedTransponderID ?? satellite.transponders.first?.id },
-                            set: { selectedTransponderID = $0 }
-                        )) {
-                            ForEach(satellite.transponders) { tp in
-                                Text(tp.description.isEmpty ? tp.kind : tp.description).tag(Optional(tp.id))
-                            }
-                        }
-                        .pickerStyle(.menu)
+                        TransponderPicker(transponders: satellite.transponders, selection: $selectedTransponderID)
+                            .equatable()
                     }
                     let cal = store.downlinkCalibrationHz(for: satellite.id, invert: transponder.invert)
                     // Calibrated dials for the tune readouts; the uncalibrated pair

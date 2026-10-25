@@ -17,6 +17,44 @@ extension Binding where Value == Double {
     }
 }
 
+/// Menu picker for a satellite's transponders, isolated from its host's redraws.
+///
+/// The hosts (Home, Orbital Analysis, Doppler planner) re-render continuously —
+/// compass-up heading updates arrive unfiltered, and live look/Doppler readouts
+/// tick every second. Rebuilding an inline `.menu` Picker while its menu is open
+/// can swallow the tap or snap back to the old choice, which is what made
+/// transponder switching feel "sticky". As an `.equatable()` view whose identity
+/// is just the transponder list and the current selection, its body only re-runs
+/// when one of those actually changes, so an open menu is left alone.
+struct TransponderPicker: View, @MainActor Equatable {
+    let transponders: [TransponderRecord]
+    @Binding var selection: String?
+
+    var body: some View {
+        Picker("Transponder", selection: Binding(
+            // A stale ID (list refreshed or reordered underneath us) falls back to
+            // the first transponder, matching what the hosts display, so the menu
+            // never shows an unmatched selection.
+            get: { resolvedID },
+            set: { selection = $0 }
+        )) {
+            ForEach(transponders) { tp in
+                Text(tp.description.isEmpty ? tp.kind : tp.description).tag(Optional(tp.id))
+            }
+        }
+        .pickerStyle(.menu)
+    }
+
+    private var resolvedID: String? {
+        if let selection, transponders.contains(where: { $0.id == selection }) { return selection }
+        return transponders.first?.id
+    }
+
+    static func == (lhs: TransponderPicker, rhs: TransponderPicker) -> Bool {
+        lhs.transponders == rhs.transponders && lhs.selection == rhs.selection
+    }
+}
+
 /// Reverse-geocodes the observer position while following the current location and
 /// hands the resolved DXCC entity / administrative subdivisions to a content
 /// builder, so different screens (Home card, Settings form) can render the same

@@ -453,15 +453,8 @@ struct HomeView: View {
         SectionCard("Transponder") {
             if let transponder = selectedTransponder(satellite) {
                 if satellite.transponders.count > 1 {
-                    Picker("Transponder", selection: Binding(
-                        get: { selectedTransponderID ?? satellite.transponders.first?.id },
-                        set: { selectedTransponderID = $0 }
-                    )) {
-                        ForEach(satellite.transponders) { tp in
-                            Text(tp.description.isEmpty ? tp.kind : tp.description).tag(Optional(tp.id))
-                        }
-                    }
-                    .pickerStyle(.menu)
+                    TransponderPicker(transponders: satellite.transponders, selection: $selectedTransponderID)
+                        .equatable()
                 }
                 MetricRow("Type", transponder.kind)
                 if !transponder.mode.isEmpty { MetricRow("Mode", transponder.mode) }
