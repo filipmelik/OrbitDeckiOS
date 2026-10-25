@@ -36,6 +36,12 @@ struct TransponderRecord: Identifiable, Codable, Equatable, Sendable {
     var type: String
     var baud: Double
     var service: String
+    /// SatNOGS `alive` flag (status active vs inactive). Optional so transmitter
+    /// caches written before it existed still decode; nil (and manual entries)
+    /// count as active.
+    var alive: Bool? = nil
+
+    var isActive: Bool { alive ?? true }
 
     // A true linear transponder has an uplink passband and a downlink passband.
     // Requiring an uplink (and a Transponder type or ≥5 kHz width) stops wide
@@ -75,7 +81,9 @@ struct TransponderRecord: Identifiable, Codable, Equatable, Sendable {
 
 struct SatelliteRecord: Identifiable, Sendable {
     let id: UInt
-    let name: String
+    // Mutable so new-launch records can carry SatNOGS's amateur name in place of
+    // CelesTrak's interim "OBJECT A" designation.
+    var name: String
     let internationalDesignator: String
     let epoch: Date
     let meanMotionRevPerDay: Double
@@ -259,6 +267,13 @@ struct ManualSatelliteDefinition: Identifiable, Codable, Equatable, Sendable {
     var meanAnomalyDeg: Double
     var meanMotionRevPerDay: Double
     var bstar: Double = 0
+    // New-launch provenance (extras only). `satnogsID` links the object to its
+    // SatNOGS entry, whose transmitters are cached under "satnogs:<id>" because
+    // SatNOGS can't yet store six-digit NORAD numbers. `placeholderNorad` means
+    // `norad` is SatNOGS's temporary 9xxxx number, so elements refresh from
+    // SatNOGS rather than CelesTrak. Optional, so older blobs still decode.
+    var satnogsID: String?
+    var placeholderNorad: Bool?
 
     init(record: SatelliteRecord) {
         self.name = record.name

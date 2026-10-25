@@ -155,6 +155,28 @@ struct GPService {
         return output
     }
 
+    /// Refresh extras that live under a SatNOGS placeholder NORAD number from
+    /// SatNOGS's own TLE feed (one sat_id lookup each). Failures keep the cached
+    /// snapshot.
+    static func fetchSatNOGSExtras(_ definitions: [ManualSatelliteDefinition]) async -> [SatelliteRecord] {
+        var output: [SatelliteRecord] = []
+        for definition in definitions {
+            guard let satID = definition.satnogsID,
+                  let tle = try? await TransponderService.fetchTLE(satID: satID),
+                  let record = satNOGSRecord(tle, name: definition.name) else { continue }
+            output.append(record)
+        }
+        return output
+    }
+
+    /// Build a record from a SatNOGS TLE (the NORAD field holds SatNOGS's
+    /// placeholder number for objects with six-digit catalog numbers).
+    static func satNOGSRecord(_ tle: SatNOGSTLE, name: String) -> SatelliteRecord? {
+        guard var record = parseTLEText("\(name)\n\(tle.line1)\n\(tle.line2)").first else { return nil }
+        record.name = name
+        return record
+    }
+
     static func parse(data: Data) throws -> [SatelliteRecord] {
         let object = try JSONSerialization.jsonObject(with: data)
         let rows: [[String: Any]]

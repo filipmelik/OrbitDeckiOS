@@ -353,15 +353,26 @@ struct AmsatStatusSummaryRecord: Identifiable, Sendable {
 }
 
 struct NewLaunchHit: Identifiable, Sendable {
-    let id: UInt
+    /// SatNOGS sat_id (stable even while the NORAD number is provisional).
+    let id: String
+    /// Real NORAD number when resolved through CelesTrak, else SatNOGS's
+    /// placeholder (see `placeholderNorad`); nil when no elements exist yet.
+    let norad: UInt?
     let name: String
     let transmitterCount: Int
+    let activeTransmitterCount: Int
     let downlinkHz: Int64
     let mode: String
     let alreadyInCatalog: Bool
-    let record: SatelliteRecord
+    /// Ready-to-add element set, or nil if neither CelesTrak nor SatNOGS has one yet.
+    let record: SatelliteRecord?
     let transponders: [TransponderRecord]
     var isNoise: Bool = false
+    var launched: Date?
+    var placeholderNorad = false
+    var internationalDesignator = ""
+    /// CelesTrak's OBJECT_NAME when it differs (often "OBJECT A" for a while).
+    var catalogName = ""
 }
 
 struct LatLon: Sendable, Equatable {
@@ -2158,39 +2169,114 @@ struct AmsatStatusService {
     }
 }
 
+/// Finds recently launched satellites that carry documented (amateur) radio
+/// transmitters.
+///
+/// The SatNOGS satellite list drives the search: it records launch dates and
+/// transmitters for new amateur payloads. The old approach joined CelesTrak's
+/// last-30-days group to SatNOGS by NORAD number, and it stopped matching once
+/// catalog numbers passed 99999. CelesTrak now issues six-digit numbers, while
+/// SatNOGS (whose schema and the TLE format allow five digits) files new
+/// objects under temporary 9xxxx IDs. Elements are resolved through the
+/// international designator, which SatNOGS's Space-Track TLEs keep:
+/// CelesTrak's OMM (real NORAD) when the launch is known there, otherwise
+/// SatNOGS's TLE under the placeholder number.
 struct NewLaunchService {
-    static func discover(knownNorads: Set<UInt>) async throws -> [NewLaunchHit] {
-        let url = URL(string: "https://celestrak.org/NORAD/elements/gp.php?GROUP=last-30-days&FORMAT=JSON")!
-        var request = URLRequest(url: url); request.timeoutInterval = 45
-        request.setValue(AppInfo.userAgent, forHTTPHeaderField: "User-Agent")
-        let gpURLRequest = request
-        async let gpRequest = URLSession.shared.data(for: gpURLRequest)
-        async let txRequest = TransponderService.fetchAll()
-        let ((data, response), transmitters) = try await (gpRequest, txRequest)
-        if let http = response as? HTTPURLResponse, !(200..<300).contains(http.statusCode) { throw URLError(.badServerResponse) }
-        guard let rows = try JSONSerialization.jsonObject(with: data) as? [[String: Any]] else { return [] }
-        var hits: [NewLaunchHit] = []
-        for row in rows {
-            let name = (row["OBJECT_NAME"] as? String) ?? ""
-            let norad: UInt?
-            if let n = row["NORAD_CAT_ID"] as? NSNumber { norad = UInt(n.uint64Value) }
-            else if let s = row["NORAD_CAT_ID"] as? String { norad = UInt(s) }
-            else { norad = nil }
-            guard let norad else { continue }
-            guard let txValue = transmitters[norad] else { continue }
-            let tx: [TransponderRecord] = txValue
-            guard let first = tx.first(where: { $0.downlinkLow > 0 }) ?? tx.first,
-                  var record = GPService.parseOMM(row) else { continue }
-            record.transponders = tx
-            hits.append(NewLaunchHit(id: norad, name: name.isEmpty ? "NORAD \(norad)" : name,
-                                     transmitterCount: tx.count, downlinkHz: first.downlinkLow,
-                                     mode: first.mode, alreadyInCatalog: knownNorads.contains(norad),
-                                     record: record, transponders: tx, isNoise: isNoise(name)))
+    /// CelesTrak per-launch (INTDES) lookups allowed per scan, for launches older
+    /// than CelesTrak's 30-day group. Kept small to respect CelesTrak's limits.
+    static let maxLaunchLookups = 8
+
+    nonisolated static func discover(knownNorads: Set<UInt>, days: Int) async throws -> [NewLaunchHit] {
+        async let satellitesRequest = TransponderService.fetchSatellites()
+        async let transmittersRequest = TransponderService.fetchIndex()
+        async let tleRequest = TransponderService.fetchTLEs()
+        async let recentRequest = celestrakRows("GROUP=last-30-days")
+        let (satellites, transmitters, tles) = try await (satellitesRequest, transmittersRequest, tleRequest)
+        // CelesTrak only upgrades placeholder IDs to real ones; a CelesTrak
+        // failure still leaves a usable SatNOGS-only result.
+        let recentRows = (try? await recentRequest) ?? []
+
+        var byIntl: [String: [String: Any]] = [:]
+        var byNorad: [UInt: [String: Any]] = [:]
+        func index(_ rows: [[String: Any]]) {
+            for row in rows {
+                if let intl = row["OBJECT_ID"] as? String { byIntl[intl] = row }
+                if let norad = TransponderService.uint(row["NORAD_CAT_ID"]) { byNorad[norad] = row }
+            }
         }
-        return hits.sorted { $0.id > $1.id }
+        index(recentRows)
+
+        let now = Date()
+        let cutoff = now.addingTimeInterval(-Double(days) * 86400)
+        let candidates = satellites.filter { sat in
+            guard sat.decayed == nil,
+                  !["decayed", "re-entered", "future"].contains(sat.status.lowercased()),
+                  !(transmitters.bySatID[sat.satID] ?? []).isEmpty else { return false }
+            if let launch = sat.launched ?? sat.deployed { return launch >= cutoff && launch <= now }
+            // No launch date on file: still recent if CelesTrak's 30-day group has it.
+            return tles[sat.satID]?.internationalDesignator.flatMap { byIntl[$0] } != nil
+        }
+
+        // Launches older than CelesTrak's 30-day window: look them up by launch.
+        let missingLaunches = Set(candidates.compactMap { sat -> String? in
+            guard let intl = tles[sat.satID]?.internationalDesignator, byIntl[intl] == nil else { return nil }
+            return String(intl.prefix(8))   // "2026-203"
+        })
+        for launch in missingLaunches.sorted().suffix(maxLaunchLookups) {
+            if let rows = try? await celestrakRows("INTDES=\(launch)") { index(rows) }
+        }
+
+        var hits: [NewLaunchHit] = []
+        for sat in candidates {
+            let tx = transmitters.bySatID[sat.satID] ?? []
+            let tle = tles[sat.satID]
+            let intl = tle?.internationalDesignator
+            let row = intl.flatMap { byIntl[$0] } ?? sat.norad.flatMap { byNorad[$0] }
+
+            var record: SatelliteRecord?
+            var placeholder = false
+            var catalogName = ""
+            if let row, var omm = GPService.parseOMM(row) {
+                catalogName = (row["OBJECT_NAME"] as? String) ?? ""
+                omm.name = sat.name
+                record = omm
+            } else if let tle, let fromTLE = GPService.satNOGSRecord(tle, name: sat.name) {
+                record = fromTLE
+                placeholder = SatNOGSSatellite.placeholderRange.contains(fromTLE.id)
+            }
+            record?.transponders = tx
+
+            let primary = tx.first { $0.isActive && $0.downlinkLow > 0 } ?? tx.first { $0.downlinkLow > 0 } ?? tx.first
+            let norad = record?.id ?? sat.norad
+            hits.append(NewLaunchHit(
+                id: sat.satID, norad: norad, name: sat.name,
+                transmitterCount: tx.count, activeTransmitterCount: tx.filter(\.isActive).count,
+                downlinkHz: primary?.downlinkLow ?? 0, mode: primary?.mode ?? "",
+                alreadyInCatalog: norad.map { knownNorads.contains($0) } ?? false,
+                record: record, transponders: tx, isNoise: isNoise(sat.name),
+                launched: sat.launched ?? sat.deployed, placeholderNorad: placeholder,
+                internationalDesignator: record?.internationalDesignator ?? intl ?? "",
+                catalogName: catalogName.caseInsensitiveCompare(sat.name) == .orderedSame ? "" : catalogName))
+        }
+        return hits.sorted { a, b in
+            let da = a.launched ?? .distantPast, db = b.launched ?? .distantPast
+            if da != db { return da > db }
+            return a.name.localizedCaseInsensitiveCompare(b.name) == .orderedAscending
+        }
     }
 
-    private static func isNoise(_ rawName: String) -> Bool {
+    private nonisolated static func celestrakRows(_ query: String) async throws -> [[String: Any]] {
+        guard let url = URL(string: "https://celestrak.org/NORAD/elements/gp.php?\(query)&FORMAT=JSON") else { return [] }
+        var request = URLRequest(url: url)
+        request.timeoutInterval = 45
+        request.setValue(AppInfo.userAgent, forHTTPHeaderField: "User-Agent")
+        let (data, response) = try await URLSession.shared.data(for: request)
+        if let http = response as? HTTPURLResponse, !(200..<300).contains(http.statusCode) { throw URLError(.badServerResponse) }
+        // CelesTrak answers an empty query with plain text ("No GP data found").
+        return (try? JSONSerialization.jsonObject(with: data) as? [[String: Any]]) ?? []
+    }
+
+    private nonisolated static func isNoise(_ rawName: String) -> Bool {
         let name = rawName.uppercased()
         if name.contains("TBA") || name.contains("TO BE ASSIGNED") { return false }
         if name.contains("R/B") || name.contains(" DEB") || name.hasSuffix("DEB") || name.contains("DEBRIS") { return true }

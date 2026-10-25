@@ -2131,10 +2131,13 @@ struct OrbitExportService {
     }
 
     static func newLaunchesCSV(_ hits: [NewLaunchHit]) -> String {
-        var rows = [["object", "norad", "downlink_hz", "mode", "transmitters", "already_in_catalog"]]
+        var rows = [["object", "norad", "temporary_id", "intl_designator", "launched", "satnogs_id",
+                     "downlink_hz", "mode", "transmitters", "active_transmitters", "already_in_catalog"]]
         rows += hits.map {
-            [$0.name, String($0.id), $0.downlinkHz > 0 ? String($0.downlinkHz) : "",
-             $0.mode, String($0.transmitterCount), $0.alreadyInCatalog ? "yes" : "no"]
+            [$0.name, $0.norad.map { String($0) } ?? "", $0.placeholderNorad ? "yes" : "no",
+             $0.internationalDesignator, $0.launched.map { ODFormat.utcDay.string(from: $0) } ?? "", $0.id,
+             $0.downlinkHz > 0 ? String($0.downlinkHz) : "",
+             $0.mode, String($0.transmitterCount), String($0.activeTransmitterCount), $0.alreadyInCatalog ? "yes" : "no"]
         }
         return csv(rows)
     }
@@ -2142,7 +2145,7 @@ struct OrbitExportService {
     static func newLaunchesPDF(_ hits: [NewLaunchHit]) -> Data {
         planningReportPDF(
             title: "New launches with documented transmitters",
-            subtitle: "CelesTrak last-30-days × SatNOGS transmitter database · user-initiated discovery",
+            subtitle: "SatNOGS launches & transmitters × CelesTrak by international designator · user-initiated discovery",
             csvText: newLaunchesCSV(hits)
         )
     }

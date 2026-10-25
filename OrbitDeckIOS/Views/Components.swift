@@ -39,7 +39,8 @@ struct TransponderPicker: View, @MainActor Equatable {
             set: { selection = $0 }
         )) {
             ForEach(transponders) { tp in
-                Text(tp.description.isEmpty ? tp.kind : tp.description).tag(Optional(tp.id))
+                let label = tp.description.isEmpty ? tp.kind : tp.description
+                Text(tp.isActive ? label : "\(label) (inactive)").tag(Optional(tp.id))
             }
         }
         .pickerStyle(.menu)

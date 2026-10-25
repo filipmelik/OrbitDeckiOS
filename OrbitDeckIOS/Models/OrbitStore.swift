@@ -180,7 +180,11 @@ final class OrbitStore: ObservableObject {
         defer { isRefreshingGP = false }
 
         let usingCelestrak = preferences.sourceKind == .celestrak
-        let extraIDs = (preferences.extraSatellites ?? []).map(\.norad)
+        // Extras under a SatNOGS placeholder number refresh from SatNOGS (CelesTrak
+        // has never heard of those numbers); the rest go to CelesTrak by NORAD.
+        let extraDefinitions = preferences.extraSatellites ?? []
+        let extraIDs = extraDefinitions.filter { $0.placeholderNorad != true }.map(\.norad)
+        let placeholderExtras = extraDefinitions.filter { $0.placeholderNorad == true && $0.satnogsID != nil }
         // fetchExtraNorads always queries CelesTrak (individual CATNR lookups).
         let allowedAtStart = celestrakAllowed("gp")
 
@@ -198,11 +202,26 @@ final class OrbitStore: ObservableObject {
             if !extraIDs.isEmpty && allowedAtStart {
                 refreshedExtras = await GPService.fetchExtraNorads(extraIDs)
                 recordCelestrakFetch("gp")
-                if !refreshedExtras.isEmpty {
-                    var byID = Dictionary(uniqueKeysWithValues: (preferences.extraSatellites ?? []).map { ($0.norad, $0) })
-                    for record in refreshedExtras { byID[record.id] = ManualSatelliteDefinition(record: record) }
-                    preferences.extraSatellites = byID.values.sorted { $0.norad < $1.norad }
+            }
+            refreshedExtras += await GPService.fetchSatNOGSExtras(placeholderExtras)
+            if !refreshedExtras.isEmpty {
+                var byID = Dictionary(extraDefinitions.map { ($0.norad, $0) }, uniquingKeysWith: { a, _ in a })
+                for index in refreshedExtras.indices {
+                    let id = refreshedExtras[index].id
+                    var definition = ManualSatelliteDefinition(record: refreshedExtras[index])
+                    if let old = byID[id] {
+                        // Keep the SatNOGS link, and its amateur name, which beats
+                        // CelesTrak's interim "OBJECT A" designations.
+                        definition.satnogsID = old.satnogsID
+                        definition.placeholderNorad = old.placeholderNorad
+                        if old.satnogsID != nil {
+                            definition.name = old.name
+                            refreshedExtras[index].name = old.name
+                        }
+                    }
+                    byID[id] = definition
                 }
+                preferences.extraSatellites = byID.values.sorted { $0.norad < $1.norad }
             }
             let downloaded = result.records + refreshedExtras
             satellites = mergeLocalCatalog(mergeTransponders(old: satellites, new: downloaded))
@@ -237,9 +256,12 @@ final class OrbitStore: ObservableObject {
         lastError = nil
         defer { isRefreshingTransponders = false }
         do {
-            let fetched = try await TransponderService.fetchAll()
+            let fetched = try await TransponderService.fetchIndex()
             var byString: [String: [TransponderRecord]] = [:]
-            for (norad, list) in fetched { byString[String(norad)] = list }
+            for (norad, list) in fetched.byNorad { byString[String(norad)] = list }
+            // Also cache by SatNOGS sat_id, for new-launch extras whose real
+            // (six-digit) NORAD number SatNOGS can't yet record.
+            for (satID, list) in fetched.bySatID { byString[Self.satnogsKey(satID)] = list }
             allTransponders = byString
             try? Self.ensureApplicationSupport()
             if let data = try? JSONEncoder().encode(byString) {
@@ -247,7 +269,7 @@ final class OrbitStore: ObservableObject {
             }
             satellites = satellites.map { applyManualTransponders(to: $0) }
             lastTransponderRefresh = .now
-            statusMessage = "Cached transmitters for \(byString.count) satellites"
+            statusMessage = "Cached transmitters for \(fetched.byNorad.count) satellites"
         } catch {
             if Self.isOffline(error) {
                 statusMessage = "Offline — using cached transmitters"
@@ -366,9 +388,15 @@ final class OrbitStore: ObservableObject {
         preferences.selectedNorad = record.id
     }
 
-    func addExtraSatellite(_ record: SatelliteRecord, transponders: [TransponderRecord]) {
+    /// Cache key for transmitters filed under a SatNOGS sat_id.
+    nonisolated static func satnogsKey(_ satID: String) -> String { "satnogs:\(satID)" }
+
+    func addExtraSatellite(_ record: SatelliteRecord, transponders: [TransponderRecord],
+                           satnogsID: String? = nil, placeholderNorad: Bool = false) {
         var extras = preferences.extraSatellites ?? []
-        let definition = ManualSatelliteDefinition(record: record)
+        var definition = ManualSatelliteDefinition(record: record)
+        definition.satnogsID = satnogsID
+        definition.placeholderNorad = placeholderNorad ? true : nil
         if let index = extras.firstIndex(where: { $0.norad == record.id }) {
             extras[index] = definition
         } else {
@@ -600,7 +628,9 @@ final class OrbitStore: ObservableObject {
     private func applyManualTransponders(to record: SatelliteRecord) -> SatelliteRecord {
         var record = record
         let key = String(record.id)
-        let cached = allTransponders[key] ?? []
+        // New-launch extras are linked to SatNOGS by sat_id; fall back to that.
+        let satnogsID = preferences.extraSatellites?.first { $0.norad == record.id }?.satnogsID
+        let cached = allTransponders[key] ?? satnogsID.flatMap { allTransponders[Self.satnogsKey($0)] } ?? []
         let manual = preferences.manualTransponders?[key] ?? []
         record.transponders = mergeTransponderLists(mergeTransponderLists(record.transponders, cached), manual)
         return record
@@ -612,8 +642,11 @@ final class OrbitStore: ObservableObject {
         for item in second { byID[item.id] = item }
         return byID.values.sorted {
             // Two-way transponders (uplink + downlink) come first, then alphabetical.
+            // Active before inactive (SatNOGS keeps dead transmitters on file),
+            // so the default pick is something actually on the air.
             // The ID tie-break keeps same-named transponders in a fixed order;
             // dictionary iteration order varies, which reshuffled picker menus.
+            if $0.isActive != $1.isActive { return $0.isActive }
             if $0.isTwoWay != $1.isTwoWay { return $0.isTwoWay }
             let byName = $0.description.localizedCaseInsensitiveCompare($1.description)
             if byName != .orderedSame { return byName == .orderedAscending }

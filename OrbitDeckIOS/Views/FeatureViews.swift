@@ -2729,6 +2729,7 @@ struct SpaceWeatherView: View {
 struct NewLaunchesView: View {
     @EnvironmentObject private var store: OrbitStore
     @State private var filterNoise = true
+    @AppStorage("newLaunchWindowDays") private var windowDays = 90
     @State private var allHits: [NewLaunchHit] = []
     @State private var isLoading = false
     @State private var error: String?
@@ -2746,8 +2747,14 @@ struct NewLaunchesView: View {
         Form {
             Section("Discovery") {
                 Toggle("Filter rocket bodies, debris and constellation batches", isOn: $filterNoise)
+                Picker("Launched within", selection: $windowDays) {
+                    Text("30 days").tag(30)
+                    Text("60 days").tag(60)
+                    Text("90 days").tag(90)
+                    Text("180 days").tag(180)
+                }
                 HStack {
-                    Button("Scan last 30 days") { scan() }.disabled(isLoading)
+                    Button("Scan") { scan() }.disabled(isLoading)
                     if !hits.isEmpty {
                         Button("Prepare CSV") { prepareShare(pdf: false) }.buttonStyle(.bordered)
                         Button("Prepare PDF") { prepareShare(pdf: true) }.buttonStyle(.bordered)
@@ -2759,10 +2766,10 @@ struct NewLaunchesView: View {
                         }
                     }
                 }
-                if isLoading { ProgressView("Fetching CelesTrak and SatNOGS…") }
+                if isLoading { ProgressView("Fetching SatNOGS and CelesTrak…") }
                 if let error { Text(error).foregroundStyle(ODTheme.warning) }
                 if !hasScanned {
-                    Text("The scan is user-initiated. It crosses CelesTrak's last-30-days catalog against the bulk SatNOGS transmitter database and returns objects with documented active transmitters.")
+                    Text("The scan is user-initiated. It lists satellites SatNOGS records as launched in the chosen window that have documented transmitters, then matches each to CelesTrak by international designator to get its real (now six-digit) NORAD number. Objects CelesTrak hasn't catalogued yet use SatNOGS's elements and temporary ID.")
                         .font(.caption).foregroundStyle(ODTheme.muted)
                 }
             }
@@ -2778,29 +2785,45 @@ struct NewLaunchesView: View {
                     }
                     ForEach(hits) { hit in
                         VStack(alignment: .leading, spacing: 4) {
-                            HStack {
+                            HStack(alignment: .firstTextBaseline) {
                                 Text(hit.name).font(.headline)
                                 Spacer()
-                                Text(verbatim: "NORAD \(hit.id)").font(.caption.monospaced()).foregroundStyle(ODTheme.muted)
+                                if let norad = hit.norad {
+                                    Text(verbatim: hit.placeholderNorad ? "Temp ID \(norad)" : "NORAD \(norad)")
+                                        .font(.caption.monospaced())
+                                        .foregroundStyle(hit.placeholderNorad ? ODTheme.warning : ODTheme.muted)
+                                }
                             }
-                            Text("\(hit.transmitterCount) transmitter(s) • \(hit.mode.isEmpty ? "mode unknown" : hit.mode)")
+                            let details = [hit.launched.map { "Launched \(ODFormat.utcDay.string(from: $0))" },
+                                           hit.internationalDesignator.isEmpty ? nil : hit.internationalDesignator,
+                                           hit.catalogName.isEmpty ? nil : "CelesTrak: \(hit.catalogName)"]
+                                .compactMap { $0 }
+                            if !details.isEmpty {
+                                Text(details.joined(separator: " · ")).font(.caption).foregroundStyle(ODTheme.muted)
+                            }
+                            Text("\(hit.activeTransmitterCount) of \(hit.transmitterCount) transmitter(s) active • \(hit.mode.isEmpty ? "mode unknown" : hit.mode)")
                                 .font(.caption)
                             if hit.downlinkHz > 0 {
                                 Text("Downlink \(ODFormat.frequency(hit.downlinkHz))")
                                     .font(.caption.monospaced()).foregroundStyle(ODTheme.accent)
                             }
-                            let inCatalog = store.satellites.contains { $0.id == hit.id }
-                            if inCatalog {
-                                Button(store.preferences.favorites.contains(hit.id) ? "Remove favorite" : "Add to favorites") {
-                                    store.toggleFavorite(hit.id)
+                            if let norad = hit.norad, store.satellites.contains(where: { $0.id == norad }) {
+                                Button(store.preferences.favorites.contains(norad) ? "Remove favorite" : "Add to favorites") {
+                                    store.toggleFavorite(norad)
                                 }
                                 .buttonStyle(.borderless)
-                            } else {
+                            } else if let record = hit.record {
                                 Button("Add to my satellites") {
-                                    store.addExtraSatellite(hit.record, transponders: hit.transponders)
+                                    store.addExtraSatellite(record, transponders: hit.transponders,
+                                                            satnogsID: hit.id, placeholderNorad: hit.placeholderNorad)
                                 }
                                 .buttonStyle(.borderedProminent)
-                                Text("Adds this CelesTrak element set now and keeps the NORAD ID on the normal refresh path.")
+                                Text(hit.placeholderNorad
+                                     ? "Not catalogued by CelesTrak yet: adds SatNOGS's elements under its temporary ID; they refresh from SatNOGS."
+                                     : "Adds this CelesTrak element set now and keeps the NORAD ID on the normal refresh path.")
+                                    .font(.caption).foregroundStyle(ODTheme.muted)
+                            } else {
+                                Text("No orbital elements published yet. Check again after the objects are catalogued.")
                                     .font(.caption).foregroundStyle(ODTheme.muted)
                             }
                         }
@@ -2820,9 +2843,10 @@ struct NewLaunchesView: View {
         }
         isLoading = true; error = nil; hasScanned = true; shareURL = nil
         let known = Set(store.satellites.map(\.id))
+        let days = windowDays
         Task {
             do {
-                allHits = try await NewLaunchService.discover(knownNorads: known)
+                allHits = try await NewLaunchService.discover(knownNorads: known, days: days)
                 store.recordCelestrakFetch("newlaunch")
             }
             catch { self.error = error.localizedDescription }
