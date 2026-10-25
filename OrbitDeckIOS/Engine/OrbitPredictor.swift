@@ -193,6 +193,32 @@ enum OrbitPredictor {
     }
 
 
+    /// Elevation (and sunlit state) sampled across a pass, for elevation-vs-time
+    /// plots and the auto-switch simulator. One SatelliteKit instance is reused and
+    /// sampled forward. The AOS and LOS endpoints are always included.
+    static func elevationProfile(
+        _ record: SatelliteRecord,
+        observer: ObserverSite,
+        pass: PredictedPass,
+        step: TimeInterval = 30
+    ) throws -> [ElevationSample] {
+        let satellite = Satellite(elements: record.elements)
+        func sample(_ t: Date) throws -> ElevationSample {
+            let jd = t.julianDate
+            let top = try satellite.topPosition(julianDays: jd, observer: observer.satelliteKitLocation)
+            let r = try satellite.position(julianDays: jd)
+            return ElevationSample(date: t, elevation: top.elev, sunlit: isSunlit(position: r, julianDay: jd))
+        }
+        var samples: [ElevationSample] = []
+        var t = pass.aos
+        while t < pass.los {
+            samples.append(try sample(t))
+            t = t.addingTimeInterval(step)
+        }
+        samples.append(try sample(pass.los))
+        return samples
+    }
+
     /// The next horizon-crossing event relative to `from`: if the satellite is
     /// currently up, the upcoming LOS; otherwise the next AOS (with its max elevation).
     static func nextEvent(

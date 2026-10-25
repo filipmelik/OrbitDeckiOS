@@ -126,6 +126,17 @@ enum ODFormat {
     private static let localDay = local("yyyy-MM-dd", "yyyy-MM-dd")
     private static let utcClock = fixedUTC("HH:mm 'UTC'")
     private static let localClock = local("HH:mm zzz", "h:mm a zzz")
+    private static let utcAxis = fixedUTC("HH:mm")
+    private static let localAxis = local("HH:mm", "h:mm a")
+
+    /// Compact zone-less clock for chart axis ticks, in the operator's chosen zone.
+    static func axisClock(_ date: Date) -> String {
+        (useLocalTime ? localAxis : utcAxis).string(from: date)
+    }
+    /// The zone times are displayed in (UTC unless the local-time preference is on).
+    static var displayTimeZone: TimeZone {
+        useLocalTime ? .current : TimeZone(secondsFromGMT: 0) ?? .current
+    }
 
     static var utc: DateFormatter { useLocalTime ? localFull : utcFull }
     static var utcShort: DateFormatter { useLocalTime ? localShort : utcShortFixed }
@@ -763,4 +774,305 @@ struct DopplerFrequencyLine: View {
     }
 
     private func mhz(_ hz: Int64) -> String { String(format: "%.4f", Double(hz) / 1_000_000) }
+}
+
+// MARK: - Pass timeline (KlaTrack-style)
+
+/// One satellite pass on a `PassTimelineChart`: its elevation profile plus the
+/// series color slot it is drawn in.
+struct TimelinePass: Identifiable, Sendable {
+    let id: String
+    let norad: UInt
+    let name: String
+    let colorIndex: Int
+    let samples: [ElevationSample]
+
+    var peak: ElevationSample? { samples.max { $0.elevation < $1.elevation } }
+
+    /// Linearly interpolated elevation at `date`, or nil outside the pass.
+    func elevation(at date: Date) -> Double? {
+        guard let first = samples.first, let last = samples.last,
+              date >= first.date, date <= last.date else { return nil }
+        guard let upper = samples.firstIndex(where: { $0.date >= date }) else { return last.elevation }
+        if upper == 0 { return first.elevation }
+        let a = samples[upper - 1], b = samples[upper]
+        let span = b.date.timeIntervalSince(a.date)
+        guard span > 0 else { return b.elevation }
+        let f = date.timeIntervalSince(a.date) / span
+        return a.elevation + (b.elevation - a.elevation) * f
+    }
+}
+
+/// A span during which one satellite is (or would be) the active one, drawn as a
+/// strip under the curves — used by the auto-switch plan.
+struct TimelineSpan: Identifiable, Sendable {
+    let id: Int
+    let norad: UInt
+    let name: String
+    let colorIndex: Int
+    let start: Date
+    let end: Date
+}
+
+enum PassTimeline {
+    /// Solarized accents (as KlaTrack uses), which stay distinct on the dark theme.
+    static let palette: [Color] = ["#b58900", "#cb4b16", "#dc322f", "#d33682",
+                                   "#6c71c4", "#268bd2", "#2aa198", "#859900"].map { Color(hex: $0) }
+
+    static func color(_ index: Int) -> Color { palette[((index % palette.count) + palette.count) % palette.count] }
+
+    /// Predict every pass of `satellites` that overlaps `start…end` and sample its
+    /// elevation profile. CPU-bound: call from a detached task. Each entry carries
+    /// the color slot to draw it in.
+    nonisolated static func load(_ satellites: [(record: SatelliteRecord, colorIndex: Int)],
+                                 observer: ObserverSite, from start: Date, to end: Date) -> [TimelinePass] {
+        let days = max(1.0 / 24, end.timeIntervalSince(start) / 86400)
+        var output: [TimelinePass] = []
+        for (record, colorIndex) in satellites {
+            guard let passes = try? OrbitPredictor.predictPasses(record, observer: observer, from: start,
+                                                                 minElevation: 0, maxCount: 60, horizonDays: days)
+            else { continue }
+            for pass in passes {
+                // Coarser sampling for long (HEO/GEO) windows keeps the point count sane.
+                let step = max(30, pass.duration / 400)
+                guard let samples = try? OrbitPredictor.elevationProfile(record, observer: observer, pass: pass, step: step),
+                      samples.count > 1 else { continue }
+                output.append(TimelinePass(id: "\(record.id)-\(pass.aos.timeIntervalSince1970)", norad: record.id,
+                                           name: record.name, colorIndex: colorIndex, samples: samples))
+            }
+        }
+        return output
+    }
+}
+
+/// Elevation-vs-time plot of upcoming passes on one shared time axis, after
+/// G0KLA's KlaTrack: each pass is a peak from horizon to max elevation, colored per
+/// satellite and labeled at its top, with a "now" line. Optional eclipse shading
+/// fills sunlit stretches gold and eclipsed stretches gray. Tapping a peak (or a
+/// plan-strip span) reports its satellite.
+struct PassTimelineChart: View {
+    let passes: [TimelinePass]
+    let start: Date
+    let end: Date
+    let now: Date
+    var minElevation: Double = 0
+    var eclipseShading = false
+    var spans: [TimelineSpan] = []
+    var highlighted: UInt?
+    var onSelect: ((UInt) -> Void)?
+
+    private let leftInset: CGFloat = 26
+    private let topInset: CGFloat = 16
+    private let axisHeight: CGFloat = 16
+    private let stripHeight: CGFloat = 12
+
+    var body: some View {
+        GeometryReader { geo in
+            Canvas { ctx, size in draw(in: &ctx, size: size) }
+                .contentShape(Rectangle())
+                .gesture(SpatialTapGesture().onEnded { value in
+                    if let id = hit(value.location, size: geo.size) { onSelect?(id) }
+                })
+        }
+        .frame(height: spans.isEmpty ? 170 : 186)
+        .accessibilityElement(children: .ignore)
+        .accessibilityLabel(accessibilitySummary)
+    }
+
+    // MARK: Geometry
+
+    private func plotRect(_ size: CGSize) -> CGRect {
+        let bottom = axisHeight + (spans.isEmpty ? 0 : stripHeight + 4)
+        return CGRect(x: leftInset, y: topInset, width: max(1, size.width - leftInset - 4),
+                      height: max(1, size.height - topInset - bottom))
+    }
+
+    private func x(_ date: Date, _ plot: CGRect) -> CGFloat {
+        let total = end.timeIntervalSince(start)
+        guard total > 0 else { return plot.minX }
+        return plot.minX + CGFloat(date.timeIntervalSince(start) / total) * plot.width
+    }
+
+    private func y(_ elevation: Double, _ plot: CGRect) -> CGFloat {
+        plot.maxY - CGFloat(max(0, min(90, elevation)) / 90) * plot.height
+    }
+
+    private func date(atX px: CGFloat, _ plot: CGRect) -> Date {
+        start.addingTimeInterval(Double((px - plot.minX) / plot.width) * end.timeIntervalSince(start))
+    }
+
+    // MARK: Drawing
+
+    private func draw(in ctx: inout GraphicsContext, size: CGSize) {
+        let plot = plotRect(size)
+
+        // Elevation grid at 30° / 60° with left labels, plus the horizon.
+        for el in [30.0, 60.0] {
+            var line = Path()
+            line.move(to: CGPoint(x: plot.minX, y: y(el, plot)))
+            line.addLine(to: CGPoint(x: plot.maxX, y: y(el, plot)))
+            ctx.stroke(line, with: .color(ODTheme.grid), lineWidth: 0.5)
+            ctx.draw(Text(verbatim: "\(Int(el))°").font(.system(size: 9)).foregroundStyle(ODTheme.muted),
+                     at: CGPoint(x: plot.minX - 4, y: y(el, plot)), anchor: .trailing)
+        }
+        var horizon = Path()
+        horizon.move(to: CGPoint(x: plot.minX, y: plot.maxY))
+        horizon.addLine(to: CGPoint(x: plot.maxX, y: plot.maxY))
+        ctx.stroke(horizon, with: .color(ODTheme.muted.opacity(0.6)), lineWidth: 1)
+
+        if minElevation > 0 {
+            var mask = Path()
+            mask.move(to: CGPoint(x: plot.minX, y: y(minElevation, plot)))
+            mask.addLine(to: CGPoint(x: plot.maxX, y: y(minElevation, plot)))
+            ctx.stroke(mask, with: .color(ODTheme.warn.opacity(0.5)), style: StrokeStyle(lineWidth: 0.8, dash: [3, 3]))
+        }
+
+        drawTimeAxis(in: &ctx, plot: plot)
+
+        // Curves, clipped to the plot so passes straddling the window edges are cut.
+        var curves = ctx
+        curves.clip(to: Path(CGRect(x: plot.minX, y: 0, width: plot.width, height: plot.maxY + 1)))
+        // Draw the highlighted satellite last so it sits on top.
+        let ordered = passes.sorted { ($0.norad == highlighted ? 1 : 0) < ($1.norad == highlighted ? 1 : 0) }
+        for pass in ordered { drawPass(pass, in: &curves, plot: plot) }
+
+        drawLabels(in: &ctx, plot: plot)
+
+        // "Now" line.
+        if now >= start, now <= end {
+            var line = Path()
+            line.move(to: CGPoint(x: x(now, plot), y: plot.minY - 6))
+            line.addLine(to: CGPoint(x: x(now, plot), y: plot.maxY))
+            ctx.stroke(line, with: .color(.white.opacity(0.7)), lineWidth: 1)
+        }
+
+        if !spans.isEmpty { drawSpans(in: &ctx, plot: plot) }
+    }
+
+    private func drawPass(_ pass: TimelinePass, in ctx: inout GraphicsContext, plot: CGRect) {
+        let points = pass.samples.map { CGPoint(x: x($0.date, plot), y: y($0.elevation, plot)) }
+        guard let first = points.first, let last = points.last else { return }
+        let color = PassTimeline.color(pass.colorIndex)
+        let emphasized = highlighted == pass.norad
+
+        if eclipseShading {
+            // Fill each sample interval by its sunlit state (KlaTrack's eclipse view).
+            for i in 1..<points.count {
+                var quad = Path()
+                quad.move(to: CGPoint(x: points[i - 1].x, y: plot.maxY))
+                quad.addLine(to: points[i - 1])
+                quad.addLine(to: points[i])
+                quad.addLine(to: CGPoint(x: points[i].x, y: plot.maxY))
+                quad.closeSubpath()
+                let lit = pass.samples[i - 1].sunlit
+                ctx.fill(quad, with: .color(lit ? ODTheme.warn.opacity(0.75) : ODTheme.muted.opacity(0.35)))
+            }
+        } else {
+            var area = Path()
+            area.move(to: CGPoint(x: first.x, y: plot.maxY))
+            points.forEach { area.addLine(to: $0) }
+            area.addLine(to: CGPoint(x: last.x, y: plot.maxY))
+            area.closeSubpath()
+            ctx.fill(area, with: .color(color.opacity(emphasized ? 0.35 : 0.18)))
+        }
+
+        var curve = Path()
+        curve.addLines(points)
+        ctx.stroke(curve, with: .color(eclipseShading ? .white.opacity(0.55) : color),
+                   lineWidth: emphasized ? 2.5 : 1.4)
+    }
+
+    /// Name labels at each pass peak. Taller peaks are placed first; a label that
+    /// would collide is nudged up once, then dropped (the selected satellite's
+    /// label is always kept).
+    private func drawLabels(in ctx: inout GraphicsContext, plot: CGRect) {
+        var placed: [CGRect] = []
+        let candidates = passes.compactMap { pass -> (TimelinePass, ElevationSample)? in
+            guard let peak = pass.peak, peak.date >= start, peak.date <= end else { return nil }
+            return (pass, peak)
+        }
+        .sorted { a, b in
+            if (a.0.norad == highlighted) != (b.0.norad == highlighted) { return a.0.norad == highlighted }
+            return a.1.elevation > b.1.elevation
+        }
+        for (pass, peak) in candidates {
+            let text = ctx.resolve(Text(pass.name).font(.system(size: 9, weight: .semibold))
+                .foregroundStyle(eclipseShading ? Color.white : PassTimeline.color(pass.colorIndex)))
+            let measured = text.measure(in: CGSize(width: 200, height: 20))
+            let px = min(max(x(peak.date, plot), plot.minX + measured.width / 2), plot.maxX - measured.width / 2)
+            var rect = CGRect(x: px - measured.width / 2, y: y(peak.elevation, plot) - measured.height - 1,
+                              width: measured.width, height: measured.height)
+            if placed.contains(where: { $0.intersects(rect) }) {
+                rect.origin.y -= measured.height
+                if placed.contains(where: { $0.intersects(rect) }) || rect.minY < 0 {
+                    if pass.norad != highlighted { continue }
+                }
+            }
+            rect.origin.y = max(0, rect.origin.y)
+            placed.append(rect)
+            ctx.draw(text, in: rect)
+        }
+    }
+
+    private func drawTimeAxis(in ctx: inout GraphicsContext, plot: CGRect) {
+        let total = end.timeIntervalSince(start)
+        let step: TimeInterval = total > 8 * 3600 ? 7200 : 3600
+        var calendar = Calendar(identifier: .gregorian)
+        calendar.timeZone = ODFormat.displayTimeZone
+        // First whole-hour tick at or after `start`, then every `step`.
+        guard var tick = calendar.nextDate(after: start.addingTimeInterval(-1), matching: DateComponents(minute: 0),
+                                           matchingPolicy: .nextTime) else { return }
+        if step == 7200, calendar.component(.hour, from: tick) % 2 == 1 { tick.addTimeInterval(3600) }
+        let labelY = plot.maxY + (spans.isEmpty ? 0 : stripHeight + 4) + axisHeight / 2 + 1
+        while tick <= end {
+            let px = x(tick, plot)
+            var mark = Path()
+            mark.move(to: CGPoint(x: px, y: plot.maxY))
+            mark.addLine(to: CGPoint(x: px, y: plot.maxY + 3))
+            ctx.stroke(mark, with: .color(ODTheme.muted), lineWidth: 0.8)
+            ctx.draw(Text(ODFormat.axisClock(tick)).font(.system(size: 9).monospacedDigit()).foregroundStyle(ODTheme.muted),
+                     at: CGPoint(x: px, y: labelY))
+            tick.addTimeInterval(step)
+        }
+    }
+
+    private func drawSpans(in ctx: inout GraphicsContext, plot: CGRect) {
+        let top = plot.maxY + 3
+        for span in spans {
+            let x0 = max(plot.minX, x(span.start, plot)), x1 = min(plot.maxX, x(span.end, plot))
+            guard x1 > x0 else { continue }
+            let rect = CGRect(x: x0, y: top, width: max(2, x1 - x0), height: stripHeight)
+            ctx.fill(Path(roundedRect: rect, cornerRadius: 3), with: .color(PassTimeline.color(span.colorIndex)))
+            let text = ctx.resolve(Text(span.name).font(.system(size: 8, weight: .bold)).foregroundStyle(Color.black))
+            if text.measure(in: CGSize(width: 300, height: 20)).width + 4 < rect.width {
+                ctx.draw(text, at: CGPoint(x: rect.midX, y: rect.midY))
+            }
+        }
+    }
+
+    // MARK: Interaction
+
+    private func hit(_ point: CGPoint, size: CGSize) -> UInt? {
+        let plot = plotRect(size)
+        let t = date(atX: point.x, plot)
+        if !spans.isEmpty, point.y > plot.maxY {
+            return spans.first { t >= $0.start && t <= $0.end }?.norad
+        }
+        let tappedElevation = Double((plot.maxY - point.y) / plot.height) * 90
+        // The curve whose value at the tapped time is nearest the tapped height.
+        return passes
+            .compactMap { pass in pass.elevation(at: t).map { (pass.norad, abs($0 - tappedElevation)) } }
+            .min { $0.1 < $1.1 }?.0
+    }
+
+    private var accessibilitySummary: String {
+        let upcoming = passes.compactMap { pass -> (String, ElevationSample)? in
+            guard let peak = pass.peak, peak.date >= now else { return nil }
+            return (pass.name, peak)
+        }
+        .sorted { $0.1.date < $1.1.date }
+        .prefix(4)
+        .map { "\($0.0) peaks \(Int($0.1.elevation.rounded())) degrees at \(ODFormat.axisClock($0.1.date))" }
+        return upcoming.isEmpty ? "Pass timeline: no passes in this window." : "Pass timeline. " + upcoming.joined(separator: ". ")
+    }
 }

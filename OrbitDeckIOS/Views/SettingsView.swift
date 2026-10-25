@@ -645,3 +645,227 @@ struct CalibrationsView: View {
         }
     }
 }
+
+// MARK: - Auto Switching
+
+/// Configuration for SatPC32-style automatic satellite switching: a ranked list
+/// of up to 9 priority satellites, the switch-in elevation, the conflict rule, and
+/// a simulated 12-hour plan showing which satellite wins each overlap.
+struct AutoSwitchView: View {
+    @EnvironmentObject private var store: OrbitStore
+    @EnvironmentObject private var auto: AutoSwitchController
+    @State private var adding = false
+    @State private var planPasses: [TimelinePass] = []
+    @State private var planSpans: [TimelineSpan] = []
+    @State private var planEvents: [AutoSwitchEvent] = []
+    @State private var planning = false
+
+    private static let planHours = 12.0
+
+    var body: some View {
+        List {
+            Section {
+                Toggle("Automatic satellite switching", isOn: $auto.settings.enabled)
+                if auto.settings.enabled {
+                    Label(auto.status, systemImage: "arrow.triangle.swap")
+                        .font(.subheadline)
+                        .foregroundStyle(ODTheme.good)
+                    if let event = auto.lastEvent {
+                        Text("Last switch: \(name(event.norad)) at \(ODFormat.primaryClock(event.date)) · \(reasonText(event.reason))")
+                            .font(.caption).foregroundStyle(ODTheme.muted)
+                    }
+                }
+            } footer: {
+                Text("Modeled on SatPC32's automatic satellite change. When no priority satellite is being tracked, OrbitDeck selects the highest-priority one as soon as it reaches the switch-in elevation. If a higher-priority satellite rises during another's pass, it takes over right away (at 0°) so none of its pass is lost. When the tracked satellite sets, OrbitDeck falls back to a lower-priority one that is still up. CAT Doppler and the rotator follow the selection.")
+            }
+
+            Section {
+                if auto.settings.priorities.isEmpty {
+                    Text("No priority satellites yet.").foregroundStyle(ODTheme.muted)
+                }
+                ForEach(Array(auto.settings.priorities.enumerated()), id: \.element) { index, norad in
+                    HStack(spacing: 10) {
+                        Text(verbatim: "\(index + 1)")
+                            .font(.headline.monospacedDigit())
+                            .frame(width: 22)
+                            .foregroundStyle(PassTimeline.color(index))
+                        VStack(alignment: .leading, spacing: 1) {
+                            Text(name(norad))
+                            Text(verbatim: "NORAD \(norad)").font(.caption2).foregroundStyle(ODTheme.muted)
+                        }
+                    }
+                }
+                .onMove { auto.settings.priorities.move(fromOffsets: $0, toOffset: $1) }
+                .onDelete { auto.settings.priorities.remove(atOffsets: $0) }
+                if auto.settings.priorities.count < AutoSwitchSettings.maxPriorities {
+                    Button { adding = true } label: { Label("Add satellite", systemImage: "plus.circle") }
+                }
+            } header: {
+                Text("Priority order")
+            } footer: {
+                Text("1 is the highest priority. Drag to reorder (or tap Edit); swipe to remove. Up to \(AutoSwitchSettings.maxPriorities), as in SatPC32.")
+            }
+
+            Section {
+                Toggle("Use pass-prediction minimum (\(ODFormat.angle(store.preferences.minElevation, decimals: 0)))",
+                       isOn: $auto.settings.useGlobalMinElevation)
+                if !auto.settings.useGlobalMinElevation {
+                    Stepper(value: $auto.settings.minElevation, in: 0...60, step: 5) {
+                        Text("Switch-in elevation: \(ODFormat.angle(auto.settings.minElevation, decimals: 0))")
+                    }
+                }
+                Picker("Higher priority rises", selection: $auto.settings.preemption) {
+                    Text("Switch immediately").tag(AutoSwitchSettings.Preemption.atRise)
+                    Text("Finish current pass").tag(AutoSwitchSettings.Preemption.afterPass)
+                }
+                Toggle("Pause after a manual selection", isOn: $auto.settings.holdManualSelection)
+            } header: {
+                Text("Rules")
+            } footer: {
+                Text("\"Switch immediately\" is SatPC32's behavior. SatPC32 also overrides a manual pick whenever a higher-priority satellite is up; turn on \"Pause after a manual selection\" to keep your pick while it's above the horizon (or for 15 minutes if it isn't).")
+            }
+
+            if !auto.settings.priorities.isEmpty {
+                Section {
+                    TimelineView(.periodic(from: .now, by: 60)) { context in
+                        PassTimelineChart(passes: planPasses,
+                                          start: context.date.addingTimeInterval(-900),
+                                          end: context.date.addingTimeInterval(Self.planHours * 3600),
+                                          now: context.date,
+                                          minElevation: auto.threshold(for: store),
+                                          spans: planSpans,
+                                          highlighted: store.selectedSatellite?.id)
+                            .task(id: planKey(context.date)) { await plan(from: context.date) }
+                    }
+                    .listRowInsets(EdgeInsets(top: 8, leading: 8, bottom: 8, trailing: 8))
+                    if planning && planEvents.isEmpty {
+                        HStack { Spacer(); ProgressView(); Spacer() }
+                    } else if planEvents.isEmpty {
+                        Text("No switches in the next \(Int(Self.planHours)) hours.").foregroundStyle(ODTheme.muted)
+                    }
+                    ForEach(planEvents) { event in
+                        HStack(alignment: .firstTextBaseline) {
+                            Text(ODFormat.primaryClock(event.date))
+                                .font(.caption.monospacedDigit()).foregroundStyle(ODTheme.muted)
+                                .frame(width: 92, alignment: .leading)
+                            VStack(alignment: .leading, spacing: 1) {
+                                Text(name(event.norad)).font(.subheadline.weight(.semibold))
+                                Text(reasonText(event.reason)).font(.caption).foregroundStyle(reasonColor(event.reason))
+                            }
+                        }
+                    }
+                } header: {
+                    Text("Planned switching · next \(Int(Self.planHours)) h")
+                } footer: {
+                    Text("Simulated with the current rules. The strip under the curves shows which satellite would be selected while it is up; orange entries are conflicts resolved by priority.")
+                }
+            }
+        }
+        .toolbar { EditButton() }
+        .sheet(isPresented: $adding) {
+            AutoSwitchAddSheet(excluded: Set(auto.settings.priorities)) { norad in
+                if auto.settings.priorities.count < AutoSwitchSettings.maxPriorities,
+                   !auto.settings.priorities.contains(norad) {
+                    auto.settings.priorities.append(norad)
+                }
+            }
+        }
+    }
+
+    private func name(_ norad: UInt) -> String {
+        store.satellites.first { $0.id == norad }?.name ?? "NORAD \(norad)"
+    }
+
+    private func reasonText(_ reason: AutoSwitchReason) -> String {
+        switch reason {
+        case .reachedMinimum:
+            return "reaches \(ODFormat.angle(auto.threshold(for: store), decimals: 0))"
+        case .preempted(let other):
+            return "rises during \(name(other))'s pass and takes over (higher priority)"
+        case .fellBack(let other):
+            return "\(name(other)) set; still in range"
+        }
+    }
+
+    private func reasonColor(_ reason: AutoSwitchReason) -> Color {
+        if case .preempted = reason { return ODTheme.warn }
+        return ODTheme.muted
+    }
+
+    private func planKey(_ now: Date) -> String {
+        let s = auto.settings
+        let slot = Int(now.timeIntervalSince1970 / 600)   // re-plan every 10 minutes
+        return "\(s.priorities)-\(auto.threshold(for: store))-\(s.preemption.rawValue)-\(store.preferences.observer.stableKey)-\(slot)"
+    }
+
+    @MainActor
+    private func plan(from now: Date) async {
+        let records = auto.settings.priorities.compactMap { id in store.satellites.first { $0.id == id } }
+        guard !records.isEmpty else { planPasses = []; planSpans = []; planEvents = []; return }
+        let observer = store.preferences.observer
+        let threshold = auto.threshold(for: store)
+        let preemption = auto.settings.preemption
+        let initial = store.preferences.selectedNorad
+        let start = now.addingTimeInterval(-900)
+        // Look-back (15 min) + span + one 10-minute re-plan slot of headroom.
+        let hours = Self.planHours + 0.25 + 1.0 / 6
+        planning = true
+        let result = await Task.detached(priority: .utility) {
+            AutoSwitchController.plan(priorities: records, observer: observer, from: start,
+                                      hours: hours, threshold: threshold,
+                                      preemption: preemption, initial: initial)
+        }.value
+        planning = false
+        planPasses = result.passes
+        planSpans = result.spans
+        // Only list switches from now on; the look-back is just for the chart.
+        planEvents = result.events.filter { $0.date >= now }
+    }
+}
+
+/// Searchable catalog picker for adding a priority satellite (favorites first).
+private struct AutoSwitchAddSheet: View {
+    @EnvironmentObject private var store: OrbitStore
+    @Environment(\.dismiss) private var dismiss
+    let excluded: Set<UInt>
+    let onPick: (UInt) -> Void
+    @State private var search = ""
+
+    private var satellites: [SatelliteRecord] {
+        let favorites = store.preferences.favorites
+        let q = search.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
+        return store.satellites
+            .filter { !excluded.contains($0.id) }
+            .filter { q.isEmpty || $0.name.lowercased().contains(q) || String($0.id).contains(q) }
+            .sorted { a, b in
+                let fa = favorites.contains(a.id), fb = favorites.contains(b.id)
+                if fa != fb { return fa }
+                return a.name.localizedCaseInsensitiveCompare(b.name) == .orderedAscending
+            }
+    }
+
+    var body: some View {
+        NavigationStack {
+            List(satellites) { sat in
+                Button {
+                    onPick(sat.id)
+                    dismiss()
+                } label: {
+                    HStack {
+                        Text(sat.name).foregroundStyle(.primary)
+                        Spacer()
+                        if store.preferences.favorites.contains(sat.id) {
+                            Image(systemName: "star.fill").foregroundStyle(ODTheme.warn)
+                        }
+                    }
+                }
+            }
+            .searchable(text: $search, prompt: "Name or NORAD")
+            .navigationTitle("Add priority satellite")
+            .navigationBarTitleDisplayMode(.inline)
+            .toolbar {
+                ToolbarItem(placement: .cancellationAction) { Button("Cancel") { dismiss() } }
+            }
+        }
+    }
+}

@@ -17,6 +17,122 @@ private final class TrackArcCache {
     var pass: PredictedPass?
 }
 
+/// While automatic satellite switching is on, shows its status with a one-tap off
+/// switch (SatPC32's A+/A- button). Hidden when the feature is off.
+private struct AutoSwitchBanner: View {
+    @EnvironmentObject private var auto: AutoSwitchController
+
+    var body: some View {
+        if auto.settings.enabled {
+            HStack(spacing: 8) {
+                Image(systemName: "arrow.triangle.swap").foregroundStyle(ODTheme.good)
+                Text("AUTO").font(.caption.weight(.bold)).foregroundStyle(ODTheme.good)
+                Text(auto.status).font(.caption).foregroundStyle(ODTheme.muted)
+                    .lineLimit(1).minimumScaleFactor(0.8)
+                Spacer()
+                Button("Turn off") { auto.settings.enabled = false }
+                    .font(.caption)
+                    .buttonStyle(.bordered)
+            }
+            .padding(.horizontal)
+            .accessibilityElement(children: .combine)
+        }
+    }
+}
+
+/// KlaTrack-style elevation timeline of the favorites' passes, from 30 minutes ago
+/// to a selectable span ahead. Its own view (not inline in HomeView) so the Home
+/// screen's frequent redraws, like compass heading updates, don't redraw it; it
+/// refreshes on a 30 s clock instead. Tap a peak to select that satellite.
+private struct FavoritePassTimelineCard: View {
+    @EnvironmentObject private var store: OrbitStore
+    @AppStorage("homeTimelineHours") private var hours = 6
+    @AppStorage("homeTimelineEclipse") private var eclipseShading = false
+    @State private var passes: [TimelinePass] = []
+    @State private var loading = false
+
+    private static let lookBack: TimeInterval = 1800
+    private static let slot: TimeInterval = 1800
+
+    var body: some View {
+        SectionCard("Pass timeline") {
+            TimelineView(.periodic(from: .now, by: 30)) { context in
+                let now = context.date
+                PassTimelineChart(
+                    passes: passes,
+                    start: now.addingTimeInterval(-Self.lookBack),
+                    end: now.addingTimeInterval(Double(hours) * 3600),
+                    now: now,
+                    minElevation: store.preferences.minElevation,
+                    eclipseShading: eclipseShading,
+                    highlighted: store.selectedSatellite?.id,
+                    onSelect: { store.select($0) }
+                )
+                .overlay {
+                    if passes.isEmpty {
+                        Text(loading ? "Computing…" : "No favorite passes in the next \(hours) h.")
+                            .font(.caption).foregroundStyle(ODTheme.muted)
+                    }
+                }
+                // Reload on a 30-minute slot so the precomputed window always
+                // covers what's on screen, and whenever the inputs change.
+                .task(id: loadKey(now)) { await load(around: now) }
+            }
+            HStack {
+                Picker("Span", selection: $hours) {
+                    Text(verbatim: "3 h").tag(3)
+                    Text(verbatim: "6 h").tag(6)
+                    Text(verbatim: "12 h").tag(12)
+                }
+                .pickerStyle(.segmented)
+                .frame(maxWidth: 200)
+                Spacer()
+                Button {
+                    eclipseShading.toggle()
+                } label: {
+                    Label(eclipseShading ? "Eclipse" : "Colors",
+                          systemImage: eclipseShading ? "sun.max.fill" : "paintpalette")
+                        .font(.caption)
+                }
+                .buttonStyle(.bordered)
+                .tint(eclipseShading ? ODTheme.warn : ODTheme.muted)
+                .accessibilityHint("Switch between per-satellite colors and sunlit/eclipse shading")
+            }
+            Text(eclipseShading ? "Gold: sunlit · gray: in eclipse. Tap a pass to select it."
+                                : "Elevation of each favorite's passes over time. Tap a pass to select it.")
+                .font(.caption2).foregroundStyle(ODTheme.muted)
+        }
+    }
+
+    private var favorites: [SatelliteRecord] {
+        store.satellites.filter { store.preferences.favorites.contains($0.id) }.sorted { $0.id < $1.id }
+    }
+
+    private func loadKey(_ now: Date) -> String {
+        let ids = favorites.map { String($0.id) }.joined(separator: ",")
+        let slot = Int(now.timeIntervalSince1970 / Self.slot)
+        return "\(ids)-\(store.preferences.observer.stableKey)-\(hours)-\(slot)"
+    }
+
+    @MainActor
+    private func load(around now: Date) async {
+        let sats = favorites.enumerated().map { (record: $0.element, colorIndex: $0.offset) }
+        guard !sats.isEmpty else { passes = []; return }
+        let observer = store.preferences.observer
+        // Cover from the look-back edge to the end of the span one slot from now.
+        let start = now.addingTimeInterval(-Self.lookBack)
+        let end = now.addingTimeInterval(Double(hours) * 3600 + Self.slot)
+        loading = true
+        let result = await Task.detached(priority: .utility) {
+            PassTimeline.load(sats, observer: observer, from: start, to: end)
+        }.value
+        // Publish regardless of cancellation (same reasoning as loadFleet): the
+        // detached work ran to completion, and last-writer-wins is fine here.
+        loading = false
+        passes = result
+    }
+}
+
 struct HomeView: View {
     @EnvironmentObject private var store: OrbitStore
     @Environment(\.scenePhase) private var scenePhase
@@ -54,6 +170,7 @@ struct HomeView: View {
         ScrollView {
             VStack(spacing: 14) {
                 SelectedSatelliteHeader()
+                AutoSwitchBanner()
 
                 if let satellite = store.selectedSatellite {
                     liveTrack(satellite)
@@ -269,6 +386,7 @@ struct HomeView: View {
                     }
                 }
             }
+            FavoritePassTimelineCard()
         }
     }
 

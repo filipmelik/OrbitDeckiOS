@@ -736,3 +736,202 @@ enum OrbitSecretStore {
 #endif
     }
 }
+
+// MARK: - Automatic satellite switching
+
+/// One switch the auto-switcher made (live) or would make (plan).
+struct AutoSwitchEvent: Identifiable, Sendable {
+    let id: Int
+    let date: Date
+    let norad: UInt
+    let reason: AutoSwitchReason
+}
+
+/// SatPC32-style automatic satellite switching (its "A+" mode). While enabled it
+/// checks the priority satellites every 2 s and changes the app-wide selection
+/// per `AutoSwitchRules`, so Home, CAT Doppler and the rotator all follow.
+/// It runs its own loop (started from attach) rather than a view `.task`, so it
+/// keeps working whichever screen is showing.
+@MainActor
+final class AutoSwitchController: ObservableObject {
+    static let defaultsKey = "OrbitDeckIOS.autoSwitch"
+    static let tickInterval: Duration = .seconds(2)
+    /// How long a manual pick of a satellite that isn't up holds auto switching.
+    static let manualHoldGrace: TimeInterval = 15 * 60
+
+    @Published var settings: AutoSwitchSettings {
+        didSet {
+            guard settings != oldValue else { return }
+            save()
+            manualHold = nil
+            if settings.enabled != oldValue.enabled { restartLoop() } else { tick() }
+        }
+    }
+    @Published private(set) var status = "Off"
+    @Published private(set) var lastEvent: AutoSwitchEvent?
+
+    private weak var store: OrbitStore?
+    private var loop: Task<Void, Never>?
+    private var lastAutoSelection: UInt?
+    private var lastSeenSelection: UInt?
+    private var currentWasInRange = false
+    private var manualHold: (norad: UInt, since: Date)?
+    private var eventCounter = 0
+
+    init() {
+        if let data = UserDefaults.standard.data(forKey: Self.defaultsKey),
+           let decoded = try? JSONDecoder().decode(AutoSwitchSettings.self, from: data) {
+            settings = decoded
+        } else {
+            settings = AutoSwitchSettings()
+        }
+    }
+
+    func attach(_ store: OrbitStore) {
+        self.store = store
+        restartLoop()
+    }
+
+    /// Switch-in elevation for rule 1.
+    func threshold(for store: OrbitStore) -> Double {
+        settings.useGlobalMinElevation ? store.preferences.minElevation : settings.minElevation
+    }
+
+    private func save() {
+        if let data = try? JSONEncoder().encode(settings) {
+            UserDefaults.standard.set(data, forKey: Self.defaultsKey)
+        }
+    }
+
+    private func restartLoop() {
+        loop?.cancel()
+        loop = nil
+        lastAutoSelection = nil
+        lastSeenSelection = nil
+        currentWasInRange = false
+        guard settings.enabled, store != nil else { setStatus("Off"); return }
+        loop = Task { [weak self] in
+            while !Task.isCancelled {
+                self?.tick()
+                try? await Task.sleep(for: Self.tickInterval)
+            }
+        }
+    }
+
+    private func setStatus(_ text: String) {
+        if status != text { status = text }   // avoid republishing every tick
+    }
+
+    func tick(now: Date = .now) {
+        guard settings.enabled, let store else { return }
+        let observer = store.preferences.observer
+        let selected = store.preferences.selectedNorad
+        let satellites = store.satellites
+
+        func elevation(_ norad: UInt) -> Double? {
+            guard let record = satellites.first(where: { $0.id == norad }) else { return nil }
+            return try? OrbitPredictor.look(record, observer: observer, at: now).elevation
+        }
+        func name(_ norad: UInt) -> String { satellites.first { $0.id == norad }?.name ?? "#\(norad)" }
+
+        // A selection change the switcher didn't make is a manual pick. (The first
+        // tick after enabling only records the baseline.)
+        if selected != lastSeenSelection {
+            if lastSeenSelection != nil, selected != lastAutoSelection, let selected, settings.holdManualSelection {
+                manualHold = (selected, now)
+            }
+            lastSeenSelection = selected
+            currentWasInRange = selected.flatMap(elevation).map { $0 >= 0 } ?? false
+        }
+
+        if let hold = manualHold {
+            let up = (elevation(hold.norad) ?? -1) >= 0
+            if hold.norad == selected, up || now.timeIntervalSince(hold.since) < Self.manualHoldGrace {
+                setStatus("Paused for your selection of \(name(hold.norad))")
+                return
+            }
+            manualHold = nil
+        }
+
+        let candidates = settings.priorities.enumerated().compactMap { rank, norad in
+            elevation(norad).map { AutoSwitchCandidate(norad: norad, rank: rank, elevation: $0) }
+        }
+        let floor = threshold(for: store)
+        if let decision = AutoSwitchRules.decide(current: selected, currentWasInRange: currentWasInRange,
+                                                 candidates: candidates, threshold: floor,
+                                                 preemption: settings.preemption) {
+            store.select(decision.norad)
+            lastAutoSelection = decision.norad
+            lastSeenSelection = decision.norad
+            eventCounter += 1
+            lastEvent = AutoSwitchEvent(id: eventCounter, date: now, norad: decision.norad, reason: decision.reason)
+            currentWasInRange = (candidates.first { $0.norad == decision.norad }?.elevation ?? -1) >= 0
+        } else {
+            currentWasInRange = (candidates.first { $0.norad == selected }?.elevation ?? -1) >= 0
+        }
+
+        let active = store.preferences.selectedNorad
+        if let current = candidates.first(where: { $0.norad == active }), current.elevation >= 0 {
+            setStatus("Tracking \(name(current.norad)) · priority \(current.rank + 1)")
+        } else if settings.priorities.isEmpty {
+            setStatus("Add priority satellites to start")
+        } else {
+            setStatus("Waiting for a priority satellite to reach \(ODFormat.angle(floor, decimals: 0))")
+        }
+    }
+
+    /// Simulate the rules over the next `hours` with the current settings, so the
+    /// panel can show which satellite would be active when passes overlap.
+    /// CPU-bound: call from a detached task.
+    nonisolated static func plan(priorities: [SatelliteRecord], observer: ObserverSite, from start: Date,
+                                 hours: Double, threshold: Double,
+                                 preemption: AutoSwitchSettings.Preemption,
+                                 initial: UInt?) -> (passes: [TimelinePass], spans: [TimelineSpan], events: [AutoSwitchEvent]) {
+        let end = start.addingTimeInterval(hours * 3600)
+        let passes = PassTimeline.load(priorities.enumerated().map { (record: $0.element, colorIndex: $0.offset) },
+                                       observer: observer, from: start, to: end)
+        let bySat = Dictionary(grouping: passes, by: \.norad)
+        func elevation(_ norad: UInt, _ t: Date) -> Double {
+            bySat[norad]?.lazy.compactMap { $0.elevation(at: t) }.first ?? -1
+        }
+        let names = Dictionary(priorities.map { ($0.id, $0.name) }, uniquingKeysWith: { a, _ in a })
+        let rank = Dictionary(priorities.enumerated().map { ($0.element.id, $0.offset) }, uniquingKeysWith: { a, _ in a })
+
+        var current = initial
+        var wasInRange = current.map { elevation($0, start) >= 0 } ?? false
+        var events: [AutoSwitchEvent] = []
+        var spans: [TimelineSpan] = []
+        var openSpan: (norad: UInt, start: Date)?
+        let step: TimeInterval = 30
+
+        func closeSpan(at t: Date) {
+            guard let open = openSpan else { return }
+            spans.append(TimelineSpan(id: spans.count, norad: open.norad, name: names[open.norad] ?? "",
+                                      colorIndex: rank[open.norad] ?? 0, start: open.start, end: t))
+            openSpan = nil
+        }
+
+        var t = start
+        while t <= end {
+            let candidates = priorities.enumerated().map {
+                AutoSwitchCandidate(norad: $0.element.id, rank: $0.offset, elevation: elevation($0.element.id, t))
+            }
+            if let d = AutoSwitchRules.decide(current: current, currentWasInRange: wasInRange, candidates: candidates,
+                                              threshold: threshold, preemption: preemption) {
+                current = d.norad
+                events.append(AutoSwitchEvent(id: events.count, date: t, norad: d.norad, reason: d.reason))
+            }
+            let up = current.map { elevation($0, t) >= 0 } ?? false
+            wasInRange = up
+            // The plan strip shows a satellite while it is both selected and up.
+            let active: UInt? = up ? current : nil
+            if openSpan?.norad != active {
+                closeSpan(at: t)
+                if let active, rank[active] != nil { openSpan = (active, t) }
+            }
+            t = t.addingTimeInterval(step)
+        }
+        closeSpan(at: end)
+        return (passes, spans, events)
+    }
+}

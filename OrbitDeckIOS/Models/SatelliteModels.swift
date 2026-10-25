@@ -133,6 +133,13 @@ struct LiveLook: Sendable {
     var visible: Bool { elevation > 0 }
 }
 
+/// One point of a pass's elevation-vs-time profile.
+struct ElevationSample: Sendable {
+    let date: Date
+    let elevation: Double
+    let sunlit: Bool
+}
+
 struct PredictedPass: Identifiable, Sendable {
     let id: Date
     let aos: Date
@@ -282,5 +289,100 @@ struct ManualSatelliteDefinition: Identifiable, Codable, Equatable, Sendable {
         self.meanAnomalyDeg = meanAnomalyDeg
         self.meanMotionRevPerDay = meanMotionRevPerDay
         self.bstar = bstar
+    }
+}
+
+// MARK: - Automatic satellite switching (SatPC32 Prior.SQF model)
+
+/// Settings for SatPC32-style automatic satellite switching. Stored under its own
+/// UserDefaults key (see AutoSwitchController), never inside StorePreferences, and
+/// decoded key-by-key so adding a field later can't reset the operator's list.
+struct AutoSwitchSettings: Codable, Equatable, Sendable {
+    /// SatPC32's Prior.SQF holds at most 9 priority satellites.
+    static let maxPriorities = 9
+
+    /// What happens when a higher-priority satellite rises during a lower one's pass.
+    enum Preemption: String, Codable, CaseIterable, Identifiable, Sendable {
+        case atRise      // SatPC32: switch as soon as it rises (elevation 0)
+        case afterPass   // finish the current pass first
+        var id: String { rawValue }
+    }
+
+    var enabled = false
+    /// NORAD IDs, highest priority (1) first.
+    var priorities: [UInt] = []
+    var useGlobalMinElevation = true
+    var minElevation = 10.0
+    var preemption: Preemption = .atRise
+    /// Not in SatPC32 (which always re-asserts priority): after a manual pick, hold
+    /// that satellite while it's up, or for 15 minutes if it isn't.
+    var holdManualSelection = false
+
+    init() {}
+
+    init(from decoder: Decoder) throws {
+        let c = try decoder.container(keyedBy: CodingKeys.self)
+        enabled = (try? c.decodeIfPresent(Bool.self, forKey: .enabled)) ?? false
+        priorities = (try? c.decodeIfPresent([UInt].self, forKey: .priorities)) ?? []
+        useGlobalMinElevation = (try? c.decodeIfPresent(Bool.self, forKey: .useGlobalMinElevation)) ?? true
+        minElevation = (try? c.decodeIfPresent(Double.self, forKey: .minElevation)) ?? 10
+        preemption = (try? c.decodeIfPresent(Preemption.self, forKey: .preemption)) ?? .atRise
+        holdManualSelection = (try? c.decodeIfPresent(Bool.self, forKey: .holdManualSelection)) ?? false
+    }
+}
+
+/// A priority satellite's state at one instant, as the rules see it.
+struct AutoSwitchCandidate: Sendable {
+    let norad: UInt
+    /// 0 = highest priority.
+    let rank: Int
+    let elevation: Double
+}
+
+enum AutoSwitchReason: Equatable, Sendable {
+    /// No priority satellite was being tracked in range; this one reached the
+    /// switch-in elevation.
+    case reachedMinimum
+    /// This higher-priority satellite rose during the given one's pass.
+    case preempted(UInt)
+    /// The given satellite set (LOS); this one was still in range.
+    case fellBack(UInt)
+}
+
+struct AutoSwitchDecision: Equatable, Sendable {
+    let norad: UInt
+    let reason: AutoSwitchReason
+}
+
+/// SatPC32's automatic-switching rules (manual, "Prior.SQF"):
+/// 1. No priority satellite in range: switch to a priority satellite as soon as
+///    its elevation reaches the minimum elevation.
+/// 2. A higher-priority satellite rises during a priority pass: switch to it at
+///    elevation 0, so none of its pass is lost (or, optionally, after the pass).
+/// 3. The tracked priority satellite reaches LOS: switch to a lower-priority
+///    satellite that is still in range.
+/// Pure, so the live controller and the schedule simulator share it exactly.
+enum AutoSwitchRules {
+    nonisolated static func decide(current: UInt?,
+                                   currentWasInRange: Bool,
+                                   candidates: [AutoSwitchCandidate],
+                                   threshold: Double,
+                                   preemption: AutoSwitchSettings.Preemption) -> AutoSwitchDecision? {
+        let ranked = candidates.sorted { $0.rank < $1.rank }
+        if let cur = ranked.first(where: { $0.norad == current }) {
+            if cur.elevation >= 0 {
+                // Rule 2: only a higher-priority satellite that has risen preempts.
+                guard preemption == .atRise,
+                      let higher = ranked.first(where: { $0.rank < cur.rank && $0.elevation >= 0 }) else { return nil }
+                return AutoSwitchDecision(norad: higher.norad, reason: .preempted(cur.norad))
+            }
+            // Rule 3: on the LOS transition, hand over to whatever is still up.
+            if currentWasInRange, let next = ranked.first(where: { $0.norad != cur.norad && $0.elevation >= 0 }) {
+                return AutoSwitchDecision(norad: next.norad, reason: .fellBack(cur.norad))
+            }
+        }
+        // Rule 1: nothing (priority) in range is being tracked.
+        guard let pick = ranked.first(where: { $0.elevation >= threshold && $0.norad != current }) else { return nil }
+        return AutoSwitchDecision(norad: pick.norad, reason: .reachedMinimum)
     }
 }

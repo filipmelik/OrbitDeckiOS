@@ -33,7 +33,7 @@ enum OrbitDestination: String, CaseIterable, Identifiable, Hashable {
     case orbit, orbithistory, illum, zones, ao7, mutual, transits, astronomy, skymap, conjunction, grids
     case radio, log, sstv, planning, tools, graphcalc, tinybasic, datafeeds, amsatstatus, oscarsim, oscarref, learn, references, exports
     case sunmoon, celestial, eme, spacewx, muf, propagation
-    case satellites, newlaunch, sites, calibrations, settings, about
+    case satellites, newlaunch, sites, calibrations, autoswitch, settings, about
 
     var id: String { rawValue }
 
@@ -85,6 +85,7 @@ enum OrbitDestination: String, CaseIterable, Identifiable, Hashable {
         case .newlaunch: "New Launches"
         case .sites: "Sites"
         case .calibrations: "Calibrations"
+        case .autoswitch: "Auto Switching"
         case .settings: "Settings"
         case .about: "About"
         }
@@ -138,6 +139,7 @@ enum OrbitDestination: String, CaseIterable, Identifiable, Hashable {
         case .newlaunch: "airplane.departure"
         case .sites: "mappin.and.ellipse"
         case .calibrations: "tuningfork"
+        case .autoswitch: "arrow.triangle.swap"
         case .settings: "gearshape"
         case .about: "info.circle"
         }
@@ -149,7 +151,7 @@ enum OrbitDestination: String, CaseIterable, Identifiable, Hashable {
         switch self {
         case .radar, .gridfinder, .schedule, .sunmoon, .spacewx, .muf, .propagation, .tools, .graphcalc, .tinybasic,
              .datafeeds, .learn, .references, .newlaunch, .sites, .astronomy, .eme, .log, .sstv,
-             .satellites, .calibrations, .settings, .about:
+             .satellites, .calibrations, .autoswitch, .settings, .about:
             return false
         default:
             return true
@@ -162,7 +164,7 @@ enum OrbitDestination: String, CaseIterable, Identifiable, Hashable {
              .orbit, .orbithistory, .illum, .zones, .ao7, .mutual, .transits, .astronomy,
              .skymap, .conjunction, .grids,
              .radio, .log, .sstv, .planning, .tools, .graphcalc, .tinybasic, .datafeeds, .amsatstatus, .oscarsim, .oscarref, .learn, .references, .exports, .sunmoon, .celestial, .eme, .spacewx, .muf, .propagation,
-             .satellites, .newlaunch, .sites, .calibrations, .settings, .about:
+             .satellites, .newlaunch, .sites, .calibrations, .autoswitch, .settings, .about:
             true
         default:
             false
@@ -182,7 +184,7 @@ private let navGroups: [NavGroup] = [
     NavGroup(id: "analysis", title: "ANALYSIS", items: [.orbit, .orbithistory, .illum, .zones, .ao7, .mutual, .transits, .astronomy, .skymap, .conjunction, .grids]),
     NavGroup(id: "operating", title: "OPERATING TOOLS", items: [.radio, .log, .sstv, .planning, .tools, .graphcalc, .tinybasic, .datafeeds, .amsatstatus, .oscarsim, .oscarref, .learn, .references, .exports]),
     NavGroup(id: "sky", title: "SKY & SPACE", items: [.sunmoon, .celestial, .eme, .spacewx, .muf, .propagation]),
-    NavGroup(id: "catalog", title: "CATALOG & CONFIGURATION", items: [.satellites, .newlaunch, .sites, .calibrations, .settings, .about])
+    NavGroup(id: "catalog", title: "CATALOG & CONFIGURATION", items: [.satellites, .newlaunch, .sites, .calibrations, .autoswitch, .settings, .about])
 ]
 
 struct RootView: View {
@@ -416,6 +418,7 @@ struct RootView: View {
         case .conjunction: ConjunctionView()
         case .grids: WorkableView()
         case .calibrations: CalibrationsView()
+        case .autoswitch: AutoSwitchView()
         case .radio: RadioView()
         case .log: LogScreen()
         case .sstv: SSTVGalleryScreen()
