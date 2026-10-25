@@ -316,6 +316,12 @@ struct PassesView: View {
                 PassDetailSheet(satellite: satellite, pass: pass, observer: store.preferences.observer)
             }
         }
+        .onChange(of: minEl) { _, _ in
+            Task { await load() }
+        }
+        .onChange(of: store.selectedSatellite?.id) { _, _ in
+            Task { await load() }
+        }
     }
 
     private var minElevationBar: some View {
