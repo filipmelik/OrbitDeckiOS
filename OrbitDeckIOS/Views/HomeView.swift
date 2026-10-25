@@ -24,6 +24,10 @@ struct HomeView: View {
     @State private var passError: String?
     @State private var fleetPasses: [FleetPass] = []
     @State private var fleetLoading = false
+    // Bumped by refreshExpiredPasses() to restart the pass tasks once a shown
+    // pass has ended (see passTaskKey / fleetKey).
+    @State private var passRefreshEpoch = 0
+    @State private var fleetRefreshEpoch = 0
     // The sky-track arc and its pass are memoized inline by the live TimelineView
     // (see resolveTrack) rather than loaded via a `.task`. On this device a `.task`
     // can be cancelled by the split-view navigation transition, which left the arc
@@ -155,6 +159,15 @@ struct HomeView: View {
         .task(id: fleetKey) {
             await loadFleet()
         }
+        // Expiry clock: the pass keys above only change with satellite/observer/
+        // mask, so a long foreground session would keep showing passes that have
+        // ended. A TimelineView (not a sleeping `.task`, which navigation can cancel
+        // for good) checks periodically and bumps the keys' refresh epochs.
+        .background {
+            TimelineView(.periodic(from: clockAnchor, by: 15)) { context in
+                Color.clear.onChange(of: context.date) { _, now in refreshExpiredPasses(at: now) }
+            }
+        }
         .onAppear { if compassUp { location.startHeading() } }
         .onDisappear { location.stopHeading() }
         .onChange(of: store.preferences.selectedNorad) { _, _ in
@@ -168,6 +181,7 @@ struct HomeView: View {
                 Task {
                     await loadFleet() // Recalculate upcoming passes for favorites
                 }
+                refreshExpiredPasses(at: .now)
             } else if phase == .background {
                 location.stopHeading()
             }
@@ -278,7 +292,19 @@ struct HomeView: View {
     private var fleetKey: String {
         let favorites = store.satellites.filter { store.preferences.favorites.contains($0.id) }
             .map { String($0.id) }.sorted().joined(separator: ",")
-        return "\(favorites)-\(store.preferences.observer.stableKey)-\(store.preferences.minElevation)"
+        return "\(favorites)-\(store.preferences.observer.stableKey)-\(store.preferences.minElevation)-\(fleetRefreshEpoch)"
+    }
+
+    /// Re-run the pass loads once a displayed pass has reached LOS. A reload
+    /// predicts from now, so every refreshed LOS is in the future and this
+    /// doesn't re-fire until the next pass ends.
+    private func refreshExpiredPasses(at now: Date) {
+        if !fleetLoading, fleetPasses.contains(where: { $0.pass.los <= now }) {
+            fleetRefreshEpoch += 1
+        }
+        if let nextPass, nextPass.los <= now {
+            passRefreshEpoch += 1
+        }
     }
 
     @MainActor
@@ -634,7 +660,7 @@ struct HomeView: View {
     }
 
     private var passTaskKey: String {
-        "\(store.selectedSatellite?.id ?? 0)-\(store.preferences.observer.stableKey)-\(store.preferences.minElevation)"
+        "\(store.selectedSatellite?.id ?? 0)-\(store.preferences.observer.stableKey)-\(store.preferences.minElevation)-\(passRefreshEpoch)"
     }
 
     @MainActor
