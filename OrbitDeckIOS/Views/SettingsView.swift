@@ -715,7 +715,7 @@ struct AutoSwitchView: View {
                 Toggle("Use pass-prediction minimum (\(ODFormat.angle(store.preferences.minElevation, decimals: 0)))",
                        isOn: $auto.settings.useGlobalMinElevation)
                 if !auto.settings.useGlobalMinElevation {
-                    Stepper(value: $auto.settings.minElevation, in: 0...60, step: 5) {
+                    Stepper(value: $auto.settings.minElevation, in: -10...60, step: 1) {
                         Text("Switch-in elevation: \(ODFormat.angle(auto.settings.minElevation, decimals: 0))")
                     }
                 }
@@ -723,11 +723,16 @@ struct AutoSwitchView: View {
                     Text("Switch immediately").tag(AutoSwitchSettings.Preemption.atRise)
                     Text("Finish current pass").tag(AutoSwitchSettings.Preemption.afterPass)
                 }
+                if auto.settings.preemption == .atRise {
+                    Stepper(value: $auto.settings.preemptElevation, in: -10...10, step: 1) {
+                        Text("Take over at: \(ODFormat.angle(auto.settings.preemptElevation, decimals: 0))")
+                    }
+                }
                 Toggle("Pause after a manual selection", isOn: $auto.settings.holdManualSelection)
             } header: {
                 Text("Rules")
             } footer: {
-                Text("\"Switch immediately\" is SatPC32's behavior. SatPC32 also overrides a manual pick whenever a higher-priority satellite is up; turn on \"Pause after a manual selection\" to keep your pick while it's above the horizon (or for 15 minutes if it isn't).")
+                Text("\"Take over at\" is the elevation a rising higher-priority satellite must reach: SatPC32 uses 0° (AOS); a negative value such as −5° switches early so the rotator and radio are already on it when it clears the horizon. \"Switch immediately\" is SatPC32's behavior. SatPC32 also overrides a manual pick whenever a higher-priority satellite is up; turn on \"Pause after a manual selection\" to keep your pick while it's above the horizon (or for 15 minutes if it isn't).")
             }
 
             if !auto.settings.priorities.isEmpty {
@@ -800,7 +805,7 @@ struct AutoSwitchView: View {
     private func planKey(_ now: Date) -> String {
         let s = auto.settings
         let slot = Int(now.timeIntervalSince1970 / 600)   // re-plan every 10 minutes
-        return "\(s.priorities)-\(auto.threshold(for: store))-\(s.preemption.rawValue)-\(store.preferences.observer.stableKey)-\(slot)"
+        return "\(s.priorities)-\(auto.threshold(for: store))-\(s.preemption.rawValue)-\(s.preemptElevation)-\(store.preferences.observer.stableKey)-\(slot)"
     }
 
     @MainActor
@@ -810,6 +815,7 @@ struct AutoSwitchView: View {
         let observer = store.preferences.observer
         let threshold = auto.threshold(for: store)
         let preemption = auto.settings.preemption
+        let preemptElevation = auto.settings.preemptElevation
         let initial = store.preferences.selectedNorad
         let start = now.addingTimeInterval(-900)
         // Look-back (15 min) + span + one 10-minute re-plan slot of headroom.
@@ -818,7 +824,8 @@ struct AutoSwitchView: View {
         let result = await Task.detached(priority: .utility) {
             AutoSwitchController.plan(priorities: records, observer: observer, from: start,
                                       hours: hours, threshold: threshold,
-                                      preemption: preemption, initial: initial)
+                                      preemption: preemption, preemptElevation: preemptElevation,
+                                      initial: initial)
         }.value
         planning = false
         planPasses = result.passes

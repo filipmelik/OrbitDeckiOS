@@ -335,6 +335,10 @@ struct AutoSwitchSettings: Codable, Equatable, Sendable {
     var useGlobalMinElevation = true
     var minElevation = 10.0
     var preemption: Preemption = .atRise
+    /// Elevation at which a rising higher-priority satellite takes over (rule 2).
+    /// SatPC32 uses 0° (AOS); a negative value (e.g. −5°) switches a little before
+    /// AOS so the rotator and radio are already there when it clears the horizon.
+    var preemptElevation = 0.0
     /// Not in SatPC32 (which always re-asserts priority): after a manual pick, hold
     /// that satellite while it's up, or for 15 minutes if it isn't.
     var holdManualSelection = false
@@ -348,6 +352,7 @@ struct AutoSwitchSettings: Codable, Equatable, Sendable {
         useGlobalMinElevation = (try? c.decodeIfPresent(Bool.self, forKey: .useGlobalMinElevation)) ?? true
         minElevation = (try? c.decodeIfPresent(Double.self, forKey: .minElevation)) ?? 10
         preemption = (try? c.decodeIfPresent(Preemption.self, forKey: .preemption)) ?? .atRise
+        preemptElevation = (try? c.decodeIfPresent(Double.self, forKey: .preemptElevation)) ?? 0
         holdManualSelection = (try? c.decodeIfPresent(Bool.self, forKey: .holdManualSelection)) ?? false
     }
 }
@@ -358,6 +363,9 @@ struct AutoSwitchCandidate: Sendable {
     /// 0 = highest priority.
     let rank: Int
     let elevation: Double
+    /// Elevation increasing (approaching AOS/TCA). The pre-AOS margin applies only
+    /// to a rising satellite, so a setting one still hands over at LOS.
+    var rising = true
 }
 
 enum AutoSwitchReason: Equatable, Sendable {
@@ -384,17 +392,26 @@ struct AutoSwitchDecision: Equatable, Sendable {
 ///    satellite that is still in range.
 /// Pure, so the live controller and the schedule simulator share it exactly.
 enum AutoSwitchRules {
+    /// `preemptElevation` is where a rising higher-priority satellite takes over
+    /// (SatPC32: 0°). When it's negative, a satellite at or above it also counts as
+    /// "in range" for the current one, so a bird switched to just before AOS isn't
+    /// immediately dropped again for being below the horizon.
     nonisolated static func decide(current: UInt?,
                                    currentWasInRange: Bool,
                                    candidates: [AutoSwitchCandidate],
                                    threshold: Double,
-                                   preemption: AutoSwitchSettings.Preemption) -> AutoSwitchDecision? {
+                                   preemption: AutoSwitchSettings.Preemption,
+                                   preemptElevation: Double = 0) -> AutoSwitchDecision? {
         let ranked = candidates.sorted { $0.rank < $1.rank }
+        let rangeFloor = min(0, preemptElevation)
+        func inRange(_ c: AutoSwitchCandidate) -> Bool { c.elevation >= 0 || (c.rising && c.elevation >= rangeFloor) }
         if let cur = ranked.first(where: { $0.norad == current }) {
-            if cur.elevation >= 0 {
-                // Rule 2: only a higher-priority satellite that has risen preempts.
+            if inRange(cur) {
+                // Rule 2: only a higher-priority satellite that has risen (to the
+                // preempt elevation) takes over.
                 guard preemption == .atRise,
-                      let higher = ranked.first(where: { $0.rank < cur.rank && $0.elevation >= 0 }) else { return nil }
+                      let higher = ranked.first(where: { $0.rank < cur.rank && $0.elevation >= preemptElevation
+                                                         && ($0.elevation >= 0 || $0.rising) }) else { return nil }
                 return AutoSwitchDecision(norad: higher.norad, reason: .preempted(cur.norad))
             }
             // Rule 3: on the LOS transition, hand over to whatever is still up.

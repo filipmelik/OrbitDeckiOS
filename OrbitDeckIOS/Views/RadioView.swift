@@ -340,14 +340,14 @@ struct RadioView: View {
     @ViewBuilder
     private func passbandSlider(_ transponder: TransponderRecord) -> some View {
         VStack(alignment: .leading, spacing: 5) {
-            HStack {
-                Text("Passband position")
-                Spacer()
-                let pair = nominalPair(transponder)
-                Text(String(format: "%.0f%% · DL %.4f MHz", passbandPercent, Double(pair.downlink)/1e6))
-                    .font(.caption.monospaced()).foregroundStyle(ODTheme.muted)
-            }
-            Slider(value: $passbandPercent.snapping(to: 50, within: 3), in: 0...100, step: 1)
+            let pair = nominalPair(transponder)
+            PreciseAdjuster(title: "Passband position", value: $passbandPercent, range: 0...100,
+                            steps: [0.1, 1, 5, 10],
+                            stepLabel: { String(format: "%g%%", $0) },
+                            valueLabel: { String(format: "%.1f%%", $0) },
+                            entryUnit: "%", neutral: 50, sliderStep: 1)
+            Text(String(format: "DL %.4f MHz", Double(pair.downlink) / 1e6))
+                .font(.caption.monospaced()).foregroundStyle(ODTheme.muted)
         }
     }
 

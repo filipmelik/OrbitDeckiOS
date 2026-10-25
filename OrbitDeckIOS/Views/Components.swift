@@ -825,15 +825,25 @@ enum PassTimeline {
     /// Predict every pass of `satellites` that overlaps `start…end` and sample its
     /// elevation profile. CPU-bound: call from a detached task. Each entry carries
     /// the color slot to draw it in.
+    /// `padding` extends each pass's samples that far before AOS and after LOS (with
+    /// negative elevations), for the auto-switch simulator's pre-AOS rule. The chart
+    /// clamps those to the horizon, so they draw as baseline.
     nonisolated static func load(_ satellites: [(record: SatelliteRecord, colorIndex: Int)],
-                                 observer: ObserverSite, from start: Date, to end: Date) -> [TimelinePass] {
+                                 observer: ObserverSite, from start: Date, to end: Date,
+                                 padding: TimeInterval = 0) -> [TimelinePass] {
         let days = max(1.0 / 24, end.timeIntervalSince(start) / 86400)
         var output: [TimelinePass] = []
         for (record, colorIndex) in satellites {
             guard let passes = try? OrbitPredictor.predictPasses(record, observer: observer, from: start,
                                                                  minElevation: 0, maxCount: 60, horizonDays: days)
             else { continue }
-            for pass in passes {
+            for found in passes {
+                let pass = padding > 0
+                    ? PredictedPass(id: found.id, aos: found.aos.addingTimeInterval(-padding),
+                                    los: found.los.addingTimeInterval(padding), tca: found.tca,
+                                    maxElevation: found.maxElevation, aosAzimuth: found.aosAzimuth,
+                                    losAzimuth: found.losAzimuth)
+                    : found
                 // Coarser sampling for long (HEO/GEO) windows keeps the point count sane.
                 let step = max(30, pass.duration / 400)
                 guard let samples = try? OrbitPredictor.elevationProfile(record, observer: observer, pass: pass, step: step),
@@ -1076,4 +1086,103 @@ struct PassTimelineChart: View {
         .map { "\($0.0) peaks \(Int($0.1.elevation.rounded())) degrees at \(ODFormat.axisClock($0.1.date))" }
         return upcoming.isEmpty ? "Pass timeline: no passes in this window." : "Pass timeline. " + upcoming.joined(separator: ". ")
     }
+}
+
+// MARK: - Precise adjuster
+
+/// A precise control for an offset in Hz (or any unit): −/+ buttons that repeat
+/// while held, a selectable step, tap the value to type an exact number, a reset,
+/// and an optional slider below for coarse sweeps. Used for passband tuning and
+/// per-satellite calibration, where a bare slider is too coarse to hit a value.
+struct PreciseAdjuster: View {
+    let title: String
+    @Binding var value: Double
+    let range: ClosedRange<Double>
+    /// Step choices; the middle one starts selected.
+    let steps: [Double]
+    var stepLabel: (Double) -> String = { $0 >= 1000 ? String(format: "%g kHz", $0 / 1000) : String(format: "%g Hz", $0) }
+    var valueLabel: (Double) -> String = { String(format: "%+.0f Hz", $0) }
+    /// Unit typed values are in (shown as the field's placeholder hint).
+    var entryUnit = "Hz"
+    /// The neutral value the reset button returns to.
+    var neutral = 0.0
+    var showSlider = true
+    var sliderStep = 10.0
+
+    @State private var stepIndex: Int?
+    @State private var editing = false
+    @State private var entry = ""
+    @FocusState private var fieldFocused: Bool
+
+    private var step: Double { steps[stepIndex ?? steps.count / 2] }
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 6) {
+            HStack(spacing: 8) {
+                Text(title).font(.caption.weight(.semibold)).foregroundStyle(ODTheme.accent)
+                Spacer()
+                if editing {
+                    TextField(entryUnit, text: $entry)
+                        .keyboardType(.numbersAndPunctuation)
+                        .multilineTextAlignment(.trailing)
+                        .font(.caption.monospacedDigit())
+                        .textFieldStyle(.odField)
+                        .frame(width: 110)
+                        .focused($fieldFocused)
+                        .onSubmit(commit)
+                    Text(entryUnit).font(.caption2).foregroundStyle(ODTheme.muted)
+                    Button("Done", action: commit).font(.caption).buttonStyle(.borderless)
+                } else {
+                    Button {
+                        entry = String(format: "%g", value)
+                        editing = true
+                        fieldFocused = true
+                    } label: {
+                        Text(valueLabel(value))
+                            .font(.callout.monospacedDigit().weight(.semibold))
+                            .foregroundStyle(value == neutral ? ODTheme.muted : .primary)
+                    }
+                    .buttonStyle(.borderless)
+                    .accessibilityHint("Type an exact value")
+                    if value != neutral {
+                        Button { value = neutral } label: { Image(systemName: "arrow.counterclockwise") }
+                            .font(.caption).buttonStyle(.borderless)
+                            .accessibilityLabel("Reset \(title)")
+                    }
+                }
+            }
+            HStack(spacing: 8) {
+                nudge(-1, symbol: "minus")
+                Picker("Step", selection: Binding(get: { stepIndex ?? steps.count / 2 }, set: { stepIndex = $0 })) {
+                    ForEach(steps.indices, id: \.self) { Text(stepLabel(steps[$0])).tag($0) }
+                }
+                .pickerStyle(.segmented)
+                nudge(1, symbol: "plus")
+            }
+            if showSlider {
+                Slider(value: Binding(get: { clamp(value) }, set: { value = clamp($0) }),
+                       in: range, step: sliderStep)
+            }
+        }
+    }
+
+    private func nudge(_ direction: Double, symbol: String) -> some View {
+        Button {
+            value = clamp(((value + direction * step) / step).rounded() * step)
+        } label: {
+            Image(systemName: symbol).frame(width: 30, height: 22)
+        }
+        .buttonStyle(.bordered)
+        .buttonRepeatBehavior(.enabled)
+        .accessibilityLabel("\(direction > 0 ? "Increase" : "Decrease") \(title) by \(stepLabel(step))")
+    }
+
+    private func commit() {
+        let cleaned = entry.trimmingCharacters(in: .whitespaces).replacingOccurrences(of: ",", with: ".")
+        if let v = Double(cleaned) { value = clamp(v) }
+        editing = false
+        fieldFocused = false
+    }
+
+    private func clamp(_ v: Double) -> Double { min(range.upperBound, max(range.lowerBound, v)) }
 }

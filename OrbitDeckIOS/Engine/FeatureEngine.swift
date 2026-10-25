@@ -2181,6 +2181,65 @@ struct AmsatStatusService {
 /// international designator, which SatNOGS's Space-Track TLEs keep:
 /// CelesTrak's OMM (real NORAD) when the launch is known there, otherwise
 /// SatNOGS's TLE under the placeholder number.
+/// The last New Launches scan, kept on disk so the list can be reopened (and
+/// survives a relaunch) while CelesTrak's 2-hour scan limit is still running.
+enum NewLaunchCache {
+    private struct Snapshot: Codable {
+        struct Hit: Codable {
+            var id: String
+            var norad: UInt?
+            var name: String
+            var transmitterCount: Int
+            var activeTransmitterCount: Int
+            var downlinkHz: Int64
+            var mode: String
+            var alreadyInCatalog: Bool
+            var record: ManualSatelliteDefinition?
+            var transponders: [TransponderRecord]
+            var isNoise: Bool
+            var launched: Date?
+            var placeholderNorad: Bool
+            var internationalDesignator: String
+            var catalogName: String
+        }
+        var scannedAt: Date
+        var windowDays: Int
+        var hits: [Hit]
+    }
+
+    private static var url: URL {
+        let base = FileManager.default.urls(for: .cachesDirectory, in: .userDomainMask).first!
+        return base.appendingPathComponent("newlaunches.json")
+    }
+
+    static func save(_ hits: [NewLaunchHit], windowDays: Int, at date: Date = Date()) {
+        let snapshot = Snapshot(scannedAt: date, windowDays: windowDays, hits: hits.map { h in
+            Snapshot.Hit(id: h.id, norad: h.norad, name: h.name, transmitterCount: h.transmitterCount,
+                         activeTransmitterCount: h.activeTransmitterCount, downlinkHz: h.downlinkHz, mode: h.mode,
+                         alreadyInCatalog: h.alreadyInCatalog, record: h.record.map(ManualSatelliteDefinition.init(record:)),
+                         transponders: h.transponders, isNoise: h.isNoise, launched: h.launched,
+                         placeholderNorad: h.placeholderNorad, internationalDesignator: h.internationalDesignator,
+                         catalogName: h.catalogName)
+        })
+        if let data = try? JSONEncoder().encode(snapshot) { try? data.write(to: url, options: .atomic) }
+    }
+
+    static func load() -> (scannedAt: Date, windowDays: Int, hits: [NewLaunchHit])? {
+        guard let data = try? Data(contentsOf: url),
+              let s = try? JSONDecoder().decode(Snapshot.self, from: data) else { return nil }
+        let hits = s.hits.map { h -> NewLaunchHit in
+            var record = h.record.map(GPService.makeExtraRecord)
+            record?.transponders = h.transponders
+            return NewLaunchHit(id: h.id, norad: h.norad, name: h.name, transmitterCount: h.transmitterCount,
+                                activeTransmitterCount: h.activeTransmitterCount, downlinkHz: h.downlinkHz, mode: h.mode,
+                                alreadyInCatalog: h.alreadyInCatalog, record: record, transponders: h.transponders,
+                                isNoise: h.isNoise, launched: h.launched, placeholderNorad: h.placeholderNorad,
+                                internationalDesignator: h.internationalDesignator, catalogName: h.catalogName)
+        }
+        return (s.scannedAt, s.windowDays, hits)
+    }
+}
+
 struct NewLaunchService {
     /// CelesTrak per-launch (INTDES) lookups allowed per scan, for launches older
     /// than CelesTrak's 30-day group. Kept small to respect CelesTrak's limits.

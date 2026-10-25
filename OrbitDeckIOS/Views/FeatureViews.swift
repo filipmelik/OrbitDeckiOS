@@ -2736,6 +2736,10 @@ struct NewLaunchesView: View {
     @State private var hasScanned = false
     @State private var shareURL: URL?
     @State private var shareLabel = ""
+    /// When the shown results were scanned, and with which window (from the saved
+    /// last scan until a new one runs).
+    @State private var scannedAt: Date?
+    @State private var scannedWindowDays = 0
 
     /// Applies the noise filter to the cached scan results, so toggling the
     /// switch re-filters instantly without another network scan.
@@ -2768,6 +2772,10 @@ struct NewLaunchesView: View {
                 }
                 if isLoading { ProgressView("Fetching SatNOGS and CelesTrak…") }
                 if let error { Text(error).foregroundStyle(ODTheme.warning) }
+                if let scannedAt, !isLoading {
+                    Text("Showing the scan from \(scannedAt.formatted(.relative(presentation: .named))) (\(ODFormat.utc.string(from: scannedAt))) · launched within \(scannedWindowDays) days.")
+                        .font(.caption).foregroundStyle(ODTheme.muted)
+                }
                 if !hasScanned {
                     Text("The scan is user-initiated. It lists satellites SatNOGS records as launched in the chosen window that have documented transmitters, then matches each to CelesTrak by international designator to get its real (now six-digit) NORAD number. Objects CelesTrak hasn't catalogued yet use SatNOGS's elements and temporary ID.")
                         .font(.caption).foregroundStyle(ODTheme.muted)
@@ -2831,6 +2839,17 @@ struct NewLaunchesView: View {
                 }
             }
         }
+        .onAppear(perform: restoreLastScan)
+    }
+
+    /// Bring back the last scan (saved to disk) so the list can be revisited, even
+    /// after a relaunch, without spending CelesTrak's 2-hour scan allowance.
+    private func restoreLastScan() {
+        guard allHits.isEmpty, !isLoading, let saved = NewLaunchCache.load() else { return }
+        allHits = saved.hits
+        scannedAt = saved.scannedAt
+        scannedWindowDays = saved.windowDays
+        hasScanned = true
     }
 
     private func scan() {
@@ -2839,6 +2858,7 @@ struct NewLaunchesView: View {
         guard store.celestrakAllowed("newlaunch") else {
             hasScanned = true
             error = "CelesTrak permits one launch scan every 2 hours (try again in ~\(store.celestrakCooldownMinutes("newlaunch")) min)."
+                + (allHits.isEmpty ? "" : " The list below is from your last scan.")
             return
         }
         isLoading = true; error = nil; hasScanned = true; shareURL = nil
@@ -2848,6 +2868,8 @@ struct NewLaunchesView: View {
             do {
                 allHits = try await NewLaunchService.discover(knownNorads: known, days: days)
                 store.recordCelestrakFetch("newlaunch")
+                scannedAt = Date(); scannedWindowDays = days
+                NewLaunchCache.save(allHits, windowDays: days)
             }
             catch { self.error = error.localizedDescription }
             isLoading = false

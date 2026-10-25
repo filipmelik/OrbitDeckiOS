@@ -666,27 +666,12 @@ struct HomeView: View {
     @ViewBuilder private func passbandSlider(bandwidth: Int64) -> some View {
         let half = Double(bandwidth) / 2
         Divider().padding(.vertical, 2)
-        VStack(alignment: .leading, spacing: 4) {
-            HStack {
-                Text("Passband").font(.caption.weight(.semibold)).foregroundStyle(ODTheme.accent)
-                Spacer()
-                Text(passbandOffsetHz == 0 ? "center" : String(format: "%+.1f kHz", passbandOffsetHz / 1000))
-                    .font(.caption.monospacedDigit()).foregroundStyle(ODTheme.muted)
-                if passbandOffsetHz != 0 {
-                    Button { passbandOffsetHz = 0 } label: { Image(systemName: "arrow.counterclockwise") }
-                        .font(.caption).buttonStyle(.borderless)
-                        .accessibilityLabel("Recenter passband")
-                }
-            }
-            // Clamp the bound value into range: switching to a narrower transponder
-            // can momentarily leave a wider offset in place before the reset fires,
-            // and a Slider whose value is out of range logs a runtime error.
-            let clamped = Binding(
-                get: { min(half, max(-half, passbandOffsetHz)) },
-                set: { passbandOffsetHz = $0 }
-            )
-            Slider(value: clamped.snapping(to: 0, within: 200), in: -half...half, step: 100)
-        }
+        // The adjuster clamps into range: switching to a narrower transponder can
+        // momentarily leave a wider offset in place before the reset fires.
+        PreciseAdjuster(title: "Passband", value: $passbandOffsetHz, range: -half...half,
+                        steps: [10, 100, 1000, 5000],
+                        valueLabel: { $0 == 0 ? "center" : String(format: "%+.2f kHz", $0 / 1000) },
+                        sliderStep: 100)
     }
 
     /// An unobtrusive expander that reveals per-satellite calibration sliders.
@@ -717,21 +702,8 @@ struct HomeView: View {
 
     @ViewBuilder private func calibrationSlider(title: String, value: Binding<Double>) -> some View {
         let limit = Self.calibrationLimitHz
-        // Clamp so a calibration entered elsewhere beyond ±limit doesn't drive the
-        // Slider out of range (which logs a runtime error).
-        let clamped = Binding(
-            get: { min(limit, max(-limit, value.wrappedValue)) },
-            set: { value.wrappedValue = $0 }
-        )
-        VStack(alignment: .leading, spacing: 4) {
-            HStack {
-                Text(title).font(.caption).foregroundStyle(ODTheme.muted)
-                Spacer()
-                Text(String(format: "%+.0f Hz", value.wrappedValue))
-                    .font(.caption.monospacedDigit())
-            }
-            Slider(value: clamped.snapping(to: 0, within: 30), in: -limit...limit, step: 10)
-        }
+        PreciseAdjuster(title: title, value: value, range: -limit...limit,
+                        steps: [1, 10, 100, 1000], sliderStep: 10)
     }
 
     private func calibrationBinding(_ norad: UInt, uplink: Bool) -> Binding<Double> {

@@ -886,25 +886,33 @@ final class AutoSwitchController: ObservableObject {
             manualHold = nil
         }
 
-        let candidates = settings.priorities.enumerated().compactMap { rank, norad in
-            elevation(norad).map { AutoSwitchCandidate(norad: norad, rank: rank, elevation: $0) }
+        func elevation(_ norad: UInt, at t: Date) -> Double? {
+            guard let record = satellites.first(where: { $0.id == norad }) else { return nil }
+            return try? OrbitPredictor.look(record, observer: observer, at: t).elevation
+        }
+        let candidates = settings.priorities.enumerated().compactMap { rank, norad -> AutoSwitchCandidate? in
+            guard let el = elevation(norad) else { return nil }
+            let later = elevation(norad, at: now.addingTimeInterval(20)) ?? el
+            return AutoSwitchCandidate(norad: norad, rank: rank, elevation: el, rising: later > el)
         }
         let floor = threshold(for: store)
+        let rangeFloor = min(0, settings.preemptElevation)
         if let decision = AutoSwitchRules.decide(current: selected, currentWasInRange: currentWasInRange,
                                                  candidates: candidates, threshold: floor,
-                                                 preemption: settings.preemption) {
+                                                 preemption: settings.preemption,
+                                                 preemptElevation: settings.preemptElevation) {
             store.select(decision.norad)
             lastAutoSelection = decision.norad
             lastSeenSelection = decision.norad
             eventCounter += 1
             lastEvent = AutoSwitchEvent(id: eventCounter, date: now, norad: decision.norad, reason: decision.reason)
-            currentWasInRange = (candidates.first { $0.norad == decision.norad }?.elevation ?? -1) >= 0
+            currentWasInRange = (candidates.first { $0.norad == decision.norad }?.elevation ?? -90) >= rangeFloor
         } else {
-            currentWasInRange = (candidates.first { $0.norad == selected }?.elevation ?? -1) >= 0
+            currentWasInRange = (candidates.first { $0.norad == selected }?.elevation ?? -90) >= rangeFloor
         }
 
         let active = store.preferences.selectedNorad
-        if let current = candidates.first(where: { $0.norad == active }), current.elevation >= 0 {
+        if let current = candidates.first(where: { $0.norad == active }), current.elevation >= rangeFloor {
             setStatus("Tracking \(name(current.norad)) · priority \(current.rank + 1)")
         } else if settings.priorities.isEmpty {
             setStatus("Add priority satellites to start")
@@ -919,14 +927,20 @@ final class AutoSwitchController: ObservableObject {
     nonisolated static func plan(priorities: [SatelliteRecord], observer: ObserverSite, from start: Date,
                                  hours: Double, threshold: Double,
                                  preemption: AutoSwitchSettings.Preemption,
+                                 preemptElevation: Double = 0,
                                  initial: UInt?) -> (passes: [TimelinePass], spans: [TimelineSpan], events: [AutoSwitchEvent]) {
         let end = start.addingTimeInterval(hours * 3600)
+        // A pre-AOS switch elevation needs elevations just below the horizon, so
+        // sample a few minutes either side of each pass (≈1°/10 s near the horizon on LEO).
+        let padding: TimeInterval = preemptElevation < 0 ? max(120, -preemptElevation * 60) : 0
         let passes = PassTimeline.load(priorities.enumerated().map { (record: $0.element, colorIndex: $0.offset) },
-                                       observer: observer, from: start, to: end)
+                                       observer: observer, from: start, to: end, padding: padding)
         let bySat = Dictionary(grouping: passes, by: \.norad)
+        // Outside every sampled window the satellite is well below the horizon.
         func elevation(_ norad: UInt, _ t: Date) -> Double {
-            bySat[norad]?.lazy.compactMap { $0.elevation(at: t) }.first ?? -1
+            bySat[norad]?.lazy.compactMap { $0.elevation(at: t) }.first ?? -90
         }
+        let rangeFloor = min(0, preemptElevation)
         let names = Dictionary(priorities.map { ($0.id, $0.name) }, uniquingKeysWith: { a, _ in a })
         let rank = Dictionary(priorities.enumerated().map { ($0.element.id, $0.offset) }, uniquingKeysWith: { a, _ in a })
 
@@ -947,15 +961,20 @@ final class AutoSwitchController: ObservableObject {
         var t = start
         while t <= end {
             let candidates = priorities.enumerated().map {
-                AutoSwitchCandidate(norad: $0.element.id, rank: $0.offset, elevation: elevation($0.element.id, t))
+                let el = elevation($0.element.id, t)
+                return AutoSwitchCandidate(norad: $0.element.id, rank: $0.offset, elevation: el,
+                                           rising: elevation($0.element.id, t.addingTimeInterval(step)) > el)
             }
             if let d = AutoSwitchRules.decide(current: current, currentWasInRange: wasInRange, candidates: candidates,
-                                              threshold: threshold, preemption: preemption) {
+                                              threshold: threshold, preemption: preemption,
+                                              preemptElevation: preemptElevation) {
                 current = d.norad
                 events.append(AutoSwitchEvent(id: events.count, date: t, norad: d.norad, reason: d.reason))
             }
-            let up = current.map { elevation($0, t) >= 0 } ?? false
-            wasInRange = up
+            let el = current.map { elevation($0, t) } ?? -90
+            let rising = current.map { elevation($0, t.addingTimeInterval(step)) > el } ?? false
+            wasInRange = el >= 0 || (rising && el >= rangeFloor)
+            let up = el >= 0
             // The plan strip shows a satellite while it is both selected and up.
             let active: UInt? = up ? current : nil
             if openSpan?.norad != active {
